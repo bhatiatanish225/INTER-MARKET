@@ -1,0 +1,2 @@
+lightstreamer-client-lib>=2.2,<3
+msal>=1.30,<2

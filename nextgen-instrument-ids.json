@@ -1,0 +1,292 @@
+[
+  {
+    "contract": "SR3 Mar26",
+    "exchange": "CME",
+    "instrumentId": "2264814074172926158"
+  },
+  {
+    "contract": "SR3 Mar26-Jun26 Calendar",
+    "exchange": "CME",
+    "instrumentId": "564618620093690082"
+  },
+  {
+    "contract": "SR3 Mar26-Sep26 Calendar",
+    "exchange": "CME",
+    "instrumentId": "3311832270062287354"
+  },
+  {
+    "contract": "SR3 Mar26-Mar27 Calendar",
+    "exchange": "CME",
+    "instrumentId": "2503270178160033493"
+  },
+  {
+    "contract": "SR3 Mar26-Mar28 Calendar",
+    "exchange": "CME",
+    "instrumentId": "5233610397134586872"
+  },
+  {
+    "contract": "SR3 Mar26 3mo Butterfly",
+    "exchange": "CME",
+    "instrumentId": "4181134761848708696"
+  },
+  {
+    "contract": "SR3 Mar26 6mo Butterfly",
+    "exchange": "CME",
+    "instrumentId": "6535645137797092133"
+  },
+  {
+    "contract": "SR3 Mar26 12mo Butterfly",
+    "exchange": "CME",
+    "instrumentId": "15712777130655990863"
+  },
+  {
+    "contract": "SR3 Jun26",
+    "exchange": "CME",
+    "instrumentId": "2518875037886751798"
+  },
+  {
+    "contract": "SR3 Jun26-Sep26 Calendar",
+    "exchange": "CME",
+    "instrumentId": "10613911634636906096"
+  },
+  {
+    "contract": "SR3 Jun26-Dec26 Calendar",
+    "exchange": "CME",
+    "instrumentId": "16287914367671165382"
+  },
+  {
+    "contract": "SR3 Jun26-Jun27 Calendar",
+    "exchange": "CME",
+    "instrumentId": "18442037589349065734"
+  },
+  {
+    "contract": "SR3 Jun26-Jun28 Calendar",
+    "exchange": "CME",
+    "instrumentId": "12889857035729467321"
+  },
+  {
+    "contract": "SR3 Jun26 3mo Butterfly",
+    "exchange": "CME",
+    "instrumentId": "16669549749400149193"
+  },
+  {
+    "contract": "SR3 Jun26 6mo Butterfly",
+    "exchange": "CME",
+    "instrumentId": "6463568789433457502"
+  },
+  {
+    "contract": "SR3 Jun26 12mo Butterfly",
+    "exchange": "CME",
+    "instrumentId": "7292442455721349318"
+  },
+  {
+    "contract": "I Mar26",
+    "exchange": "ICE_L",
+    "instrumentId": "7476458790034414418"
+  },
+  {
+    "contract": "I Mar26-Jun26 Calendar",
+    "exchange": "ICE_L",
+    "instrumentId": "16357934327254784401"
+  },
+  {
+    "contract": "I Mar26-Sep26 Calendar",
+    "exchange": "ICE_L",
+    "instrumentId": "1379632109226547732"
+  },
+  {
+    "contract": "I Mar26-Mar27 Calendar",
+    "exchange": "ICE_L",
+    "instrumentId": "14598146435689094204"
+  },
+  {
+    "contract": "I Mar26-Mar28 Calendar",
+    "exchange": "ICE_L",
+    "instrumentId": "18229285703985704445"
+  },
+  {
+    "contract": "I Mar26 3mo Butterfly",
+    "exchange": "ICE_L",
+    "instrumentId": "18353823008581248192"
+  },
+  {
+    "contract": "I Mar26 6mo Butterfly",
+    "exchange": "ICE_L",
+    "instrumentId": "6731482664757516354"
+  },
+  {
+    "contract": "I Mar26 12mo Butterfly",
+    "exchange": "ICE_L",
+    "instrumentId": "10665347587956394456"
+  },
+  {
+    "contract": "I Jun26",
+    "exchange": "ICE_L",
+    "instrumentId": "5444827104880269937"
+  },
+  {
+    "contract": "I Jun26-Sep26 Calendar",
+    "exchange": "ICE_L",
+    "instrumentId": "12392819054511583198"
+  },
+  {
+    "contract": "I Jun26-Dec26 Calendar",
+    "exchange": "ICE_L",
+    "instrumentId": "16413008382165465173"
+  },
+  {
+    "contract": "I Jun26-Jun27 Calendar",
+    "exchange": "ICE_L",
+    "instrumentId": "1060758958541858544"
+  },
+  {
+    "contract": "I Jun26-Jun28 Calendar",
+    "exchange": "ICE_L",
+    "instrumentId": "9720209795795733439"
+  },
+  {
+    "contract": "I Jun26 3mo Butterfly",
+    "exchange": "ICE_L",
+    "instrumentId": "12957210021560808463"
+  },
+  {
+    "contract": "I Jun26 6mo Butterfly",
+    "exchange": "ICE_L",
+    "instrumentId": "2266339010630757985"
+  },
+  {
+    "contract": "I Jun26 12mo Butterfly",
+    "exchange": "ICE_L",
+    "instrumentId": "18027410752757306316"
+  },
+  {
+    "contract": "I Jun26 24mo Butterfly",
+    "exchange": "ICE_L",
+    "instrumentId": "1610756719801302840"
+  },
+  {
+    "contract": "I Sep26",
+    "exchange": "ICE_L",
+    "instrumentId": "6628990053936569924"
+  },
+  {
+    "contract": "I Sep26-Dec26 Calendar",
+    "exchange": "ICE_L",
+    "instrumentId": "1311068273505625388"
+  },
+  {
+    "contract": "I Sep26-Mar27 Calendar",
+    "exchange": "ICE_L",
+    "instrumentId": "5095276832087724662"
+  },
+  {
+    "contract": "I Sep26-Sep27 Calendar",
+    "exchange": "ICE_L",
+    "instrumentId": "16890914557529963213"
+  },
+  {
+    "contract": "I Sep26-Sep28 Calendar",
+    "exchange": "ICE_L",
+    "instrumentId": "10469039348678297178"
+  },
+  {
+    "contract": "I Sep26 3mo Butterfly",
+    "exchange": "ICE_L",
+    "instrumentId": "5455585003313830833"
+  },
+  {
+    "contract": "I Sep26 6mo Butterfly",
+    "exchange": "ICE_L",
+    "instrumentId": "10159950984623086980"
+  },
+  {
+    "contract": "I Sep26 12mo Butterfly",
+    "exchange": "ICE_L",
+    "instrumentId": "11513269497977315865"
+  },
+  {
+    "contract": "I Sep26 24mo Butterfly",
+    "exchange": "ICE_L",
+    "instrumentId": "403244334735303450"
+  },
+  {
+    "contract": "SO3 Mar26",
+    "exchange": "ICE_L",
+    "instrumentId": "1000973058687712295"
+  },
+  {
+    "contract": "SO3 Mar26-Jun26 Calendar",
+    "exchange": "ICE_L",
+    "instrumentId": "12564971904600341647"
+  },
+  {
+    "contract": "SO3 Mar26-Sep26 Calendar",
+    "exchange": "ICE_L",
+    "instrumentId": "14354754587866611874"
+  },
+  {
+    "contract": "SO3 Mar26-Mar27 Calendar",
+    "exchange": "ICE_L",
+    "instrumentId": "4113881868480495546"
+  },
+  {
+    "contract": "SO3 Mar26-Mar28 Calendar",
+    "exchange": "ICE_L",
+    "instrumentId": "11704789302194383319"
+  },
+  {
+    "contract": "SO3 Mar26 3mo Butterfly",
+    "exchange": "ICE_L",
+    "instrumentId": "5017243459135416192"
+  },
+  {
+    "contract": "SO3 Mar26 6mo Butterfly",
+    "exchange": "ICE_L",
+    "instrumentId": "14526080735319661541"
+  },
+  {
+    "contract": "SO3 Mar26 12mo Butterfly",
+    "exchange": "ICE_L",
+    "instrumentId": "15062126074186875625"
+  },
+  {
+    "contract": "SO3 Jun26",
+    "exchange": "ICE_L",
+    "instrumentId": "17388498933531365606"
+  },
+  {
+    "contract": "SO3 Jun26-Sep26 Calendar",
+    "exchange": "ICE_L",
+    "instrumentId": "1148771427230900671"
+  },
+  {
+    "contract": "SO3 Jun26-Dec26 Calendar",
+    "exchange": "ICE_L",
+    "instrumentId": "7606668504795640070"
+  },
+  {
+    "contract": "SO3 Jun26-Jun27 Calendar",
+    "exchange": "ICE_L",
+    "instrumentId": "12722442377507655019"
+  },
+  {
+    "contract": "SO3 Jun26-Jun28 Calendar",
+    "exchange": "ICE_L",
+    "instrumentId": "2125814250580889343"
+  },
+  {
+    "contract": "SO3 Jun26 3mo Butterfly",
+    "exchange": "ICE_L",
+    "instrumentId": "13650242771690895435"
+  },
+  {
+    "contract": "SO3 Jun26 6mo Butterfly",
+    "exchange": "ICE_L",
+    "instrumentId": "3789661022643334510"
+  },
+  {
+    "contract": "SO3 Jun26 12mo Butterfly",
+    "exchange": "ICE_L",
+    "instrumentId": "11134916670170124674"
+  }
+]

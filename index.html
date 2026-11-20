@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Intermarket Dashboard</title>
+  <link rel="stylesheet" href="/styles.css">
+  <script type="module" src="/app.mjs"></script>
+</head>
+<body>
+  <aside class="rail">
+    <a class="brand" href="#vwap" aria-label="Intermarket overview">
+      <span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i></span>
+      <span>Intermarket<small>Rates workspace</small></span>
+    </a>
+    <nav aria-label="Dashboard screens">
+      <a href="#vwap"><span class="nav-icon icon-grid" aria-hidden="true"></span>VWAP Board</a>
+      <a href="#prices"><span class="nav-icon icon-prices" aria-hidden="true"></span>Live Prices</a>
+      <a href="#curves"><span class="nav-icon icon-curve" aria-hidden="true"></span>Curves</a>
+      <a href="#strategies"><span class="nav-icon icon-layers" aria-hidden="true"></span>Strategies</a>
+      <a href="#simulator"><span class="nav-icon icon-sliders" aria-hidden="true"></span>Simulator</a>
+    </nav>
+    <div class="rail-footer"><span class="rail-lock" aria-hidden="true"></span>Local workspace</div>
+  </aside>
+  <div class="workspace">
+    <header class="topbar">
+      <div class="topbar-title">Rates futures <span>/</span> <strong id="breadcrumb">VWAP Board</strong></div>
+      <div class="feed-controls">
+        <span id="feed-status" class="feed-status"><span></span>Snapshot mode</span>
+        <button class="button small" id="feed-open" type="button">Connect live</button>
+        <button class="button small theme-toggle" id="theme-toggle" type="button" aria-label="Dark mode" aria-pressed="false" title="Switch to dark mode">
+          <span class="theme-moon" aria-hidden="true"></span><span class="theme-label">Dark mode</span>
+        </button>
+      </div>
+    </header>
+    <main id="main" aria-busy="true">
+      <div class="page-title"><h1>VWAP Board</h1><p>Loading the instrument catalogue…</p></div>
+    </main>
+  </div>
+  <dialog id="feed-dialog" aria-labelledby="feed-heading">
+    <div class="dialog-head">
+      <div><h2 id="feed-heading">Lightstreamer connection</h2><p>Sign in with your Hertshten Microsoft account.</p></div>
+      <form method="dialog"><button class="icon-button" aria-label="Close" value="close">×</button></form>
+    </div>
+    <form id="signin-form">
+      <label>Work email <input id="signin-email" type="email" autocomplete="username" required placeholder="first.last@hertshtengroup.com"></label>
+      <button class="button primary" type="submit">Start sign-in</button>
+    </form>
+    <div id="connection-detail" aria-live="polite"></div>
+  </dialog>
+  <dialog id="percentile-dialog" aria-labelledby="percentile-heading" aria-describedby="percentile-context">
+    <div class="dialog-head">
+      <div><h2 id="percentile-heading">Percentile calculation</h2><p id="percentile-context"></p></div>
+      <form method="dialog"><button class="icon-button" aria-label="Close percentile calculation" autofocus>×</button></form>
+    </div>
+    <div class="percentile-toolbar">
+      <p class="percentile-summary as-num" id="percentile-summary"></p>
+      <label class="input-label">Lookback <select id="percentile-lookback"></select></label>
+    </div>
+    <figure class="percentile-chart" hidden>
+      <figcaption class="chart-legend">
+        <span><i class="legend-line" aria-hidden="true"></i>Daily closes</span>
+        <span><i class="legend-line dashed reference" aria-hidden="true"></i><span id="percentile-live-key"></span></span>
+      </figcaption>
+      <div id="percentile-chart" class="chart-shell"></div>
+    </figure>
+    <div id="percentile-observations"></div>
+    <p class="percentile-method" id="percentile-method"></p>
+  </dialog>
+</body>
+</html>
