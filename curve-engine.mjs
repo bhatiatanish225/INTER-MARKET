@@ -5,8 +5,10 @@ export const markets = [
 ];
 
 export const tenors = [3, 6, 12, 24];
-export const percentileWindows = [30, 60, 90, 240];
+export const strategyTenors = [3, 6, 9, 12, 24];
+export const percentileWindows = [30, 60, 90, 240, 365, 540];
 export const minimumPercentileDays = 5;
+export const strategyRangeWindows = [30, 60, 240, 560];
 const DAY_MS = 86_400_000;
 const monthNames = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 const londonMonth = new Intl.DateTimeFormat('en-GB', {
@@ -24,8 +26,10 @@ const offsets = {
 };
 
 export function contractLabel(family, start, tenor) {
-  return offsets[family](tenor).map(offset => monthLabel(start + offset)).join(' – ');
+  return packageDeliveries(family, start, tenor).map(monthLabel).join(' – ');
 }
+
+export const packageDeliveries = (family, start, tenor) => offsets[family](tenor).map(offset => start + offset);
 
 export function currentMonth() {
   const parts = londonMonth.formatToParts();
@@ -42,11 +46,13 @@ export function buildBook(catalog) {
   const listed = new Map();
   const delivery = new Map(markets.map(market => [market.id, new Set()]));
   const startsByType = new Map();
+  const closeDays = new Set();
   let historyRefreshedAt = null;
   let historyRefreshFailedAt = null;
   for (const item of catalog) {
     listed.set(keyOf(item.market, item.family, item.start, item.tenor), item);
     if (item.family === 'out') delivery.get(item.market).add(item.start);
+    for (const [day] of item.dailyCloses ?? []) closeDays.add(day);
     const stamp = item.dailyCloses?.length ? Date.parse(item.historyRefreshedAt) : NaN;
     if (Number.isFinite(stamp) && (historyRefreshedAt === null || stamp > historyRefreshedAt)) {
       historyRefreshedAt = stamp;
@@ -57,7 +63,7 @@ export function buildBook(catalog) {
     }
   }
   for (const market of markets) {
-    for (const [family, periods] of [['out', [0]], ['spread', tenors], ['fly', tenors]]) {
+    for (const [family, periods] of [['out', [0]], ['spread', strategyTenors], ['fly', strategyTenors]]) {
       for (const tenor of periods) {
         const relevant = new Set(catalog.filter(item =>
           item.market === market.id && item.family === family && item.tenor === tenor,
@@ -70,7 +76,7 @@ export function buildBook(catalog) {
       }
     }
   }
-  return { listed, delivery, startsByType, historyRefreshedAt, historyRefreshFailedAt };
+  return { listed, delivery, startsByType, closeDays: [...closeDays].sort((a, b) => a - b), historyRefreshedAt, historyRefreshFailedAt };
 }
 
 export function curveStarts(book, marketIds, family, tenor, filters) {
@@ -91,7 +97,7 @@ export function outOfScaleOutright(item, value) {
     && (value < item.mark / 10 || value > item.mark * 10);
 }
 
-function packageValue(family, values) {
+export function packageValue(family, values) {
   if (!values.every(Number.isFinite)) return null;
   const [front, middle, back] = values;
   if (family === 'out') return front;
@@ -105,9 +111,10 @@ function directRead(book, market, family, start, tenor, source, quotes) {
   const record = book.listed.get(keyOf(market, family, start, tenor));
   if (!record) return null;
   const raw = source === 'live' ? quotes[record.id] :
+    source === 'close' ? record.dailyCloses?.find(([day]) => day === quotes)?.[1] :
     source === 'settlement' ? record.settle ?? (record.markSource === 'Export settle' ? record.mark : null) : record.mark;
-  if (!Number.isFinite(raw) || (source === 'live' && outOfScaleOutright(record, raw))) return null;
-  const label = { live: 'L1 VWAP', settlement: 'Export settle' }[source] ?? record.markSource;
+  if (!Number.isFinite(raw) || ((source === 'live' || source === 'close') && outOfScaleOutright(record, raw))) return null;
+  const label = { live: 'L1 VWAP', close: 'QuantHub close', settlement: 'Export settle' }[source] ?? record.markSource;
   return { value: marketUnits(family, market, raw), source: label };
 }
 
@@ -124,6 +131,16 @@ export function marketReader(book, source, quotes, implied = true) {
     const direct = directRead(book, market, family, start, tenor, source, quotes);
     if (direct || family === 'out' || !implied) return direct;
     return impliedRead(book, market, family, start, tenor, source, quotes);
+  };
+}
+
+export function historicalCloseReader(book, day, liveRead) {
+  const reader = marketReader(book, 'close', day);
+  return (market, family, start, tenor = 0) => {
+    const live = liveRead(market, family, start, tenor);
+    if (live?.source === 'Implied') return impliedRead(book, market, family, start, tenor, 'close', day);
+    if (live?.source === 'L1 VWAP') return directRead(book, market, family, start, tenor, 'close', day);
+    return reader(market, family, start, tenor);
   };
 }
 
@@ -220,47 +237,71 @@ export function historicalPercentiles(book, today, window) {
     };
   }
 
+  function strategySample(strategy, market, start, read) {
+    const legs = strategy.legs.map(leg => {
+      const args = strategyLegArgs(leg, market, start);
+      return { args, basis: read(...args)?.source === 'Implied' ? 'implied' : 'listed', weight: strategyLegWeight(leg) };
+    });
+    const recipe = JSON.stringify(strategy.legs);
+    let cache = strategySamples.get(strategy);
+    if (cache?.recipe !== recipe) {
+      cache = { recipe, points: new Map() };
+      strategySamples.set(strategy, cache);
+    }
+    const key = `${market}/${start}/${legs.map(leg => leg.basis).join('/')}`;
+    if (!cache.points.has(key)) {
+      const inputs = legs.map(leg => sample(...leg.args, leg.basis));
+      const prices = inputs.map(input => new Map(input.rows));
+      const rows = (inputs[0]?.rows ?? []).flatMap(([day]) => {
+        const levels = prices.map(price => price.get(day));
+        if (!levels.every(Number.isFinite)) return [];
+        const weighted = levels.reduce((sum, value, index) => sum + value * legs[index].weight, 0);
+        return Number.isFinite(weighted) ? [[day, weighted, levels]] : [];
+      });
+      const basis = inputs.some(input => input.basis.startsWith('Implied'))
+        ? 'Weighted strategy closes on shared dates · includes implied leg history'
+        : 'Weighted listed closes on shared dates';
+      const details = legs.map(({ args: [market, family, start, tenor] }, index) => ({
+        market, family, start, tenor, basis: inputs[index].basis, weight: Number(strategy.legs[index].weight),
+      }));
+      cache.points.set(key, { rows, basis, legs: details });
+    }
+    return cache.points.get(key);
+  }
+
   return {
     latest,
+    packageRows(market, family, start, tenor, point) {
+      const basis = point?.source === 'Implied' ? 'implied' : point ? 'listed' : 'fallback';
+      return sample(market, family, start, tenor, basis).rows;
+    },
+    strategyRows(strategy, market, start, read) {
+      return strategySample(strategy, market, start, read).rows;
+    },
     rank(market, family, start, tenor, point) {
       const { rows, basis, legs } = sample(market, family, start, tenor, point.source === 'Implied' ? 'implied' : 'fallback');
       return { ...summarize(point.value, { rows, basis }), rows, legs };
     },
     strategyRank(strategy, market, start, point, read, includeDetails = false) {
-      const legs = strategy.legs.map(leg => {
-        const args = strategyLegArgs(leg, market, start);
-        return { args, basis: read(...args)?.source === 'Implied' ? 'implied' : 'listed', weight: strategyLegWeight(leg) };
-      });
-      const recipe = JSON.stringify(strategy.legs);
-      let cache = strategySamples.get(strategy);
-      if (cache?.recipe !== recipe) {
-        cache = { recipe, points: new Map() };
-        strategySamples.set(strategy, cache);
-      }
-      const key = `${market}/${start}/${legs.map(leg => leg.basis).join('/')}`;
-      if (!cache.points.has(key)) {
-        const inputs = legs.map(leg => sample(...leg.args, leg.basis));
-        const prices = inputs.map(input => new Map(input.rows));
-        const rows = (inputs[0]?.rows ?? []).flatMap(([day]) => {
-          const levels = prices.map(price => price.get(day));
-          if (!levels.every(Number.isFinite)) return [];
-          const weighted = levels.reduce((sum, value, index) => sum + value * legs[index].weight, 0);
-          return Number.isFinite(weighted) ? [[day, weighted, levels]] : [];
-        });
-        const basis = inputs.some(input => input.basis.startsWith('Implied'))
-          ? 'Weighted strategy closes on shared dates · includes implied leg history'
-          : 'Weighted listed closes on shared dates';
-        const details = legs.map(({ args: [market, family, start, tenor] }, index) => ({
-          market, family, start, tenor, basis: inputs[index].basis, weight: Number(strategy.legs[index].weight),
-        }));
-        cache.points.set(key, { rows, basis, legs: details });
-      }
-      const observations = cache.points.get(key);
+      const observations = strategySample(strategy, market, start, read);
       const rank = summarize(point.value, observations);
       if (!includeDetails) return rank;
       return { ...rank, rows: observations.rows, legs: observations.legs };
     },
   };
+}
+
+export function closingRanges(rows, today) {
+  return strategyRangeWindows.map(days => {
+    let low = Infinity, high = -Infinity, count = 0;
+    for (const [day, value] of rows) {
+      if (day < today - days || day >= today || !Number.isFinite(value)) continue;
+      low = Math.min(low, value);
+      high = Math.max(high, value);
+      count += 1;
+    }
+    return { days, low: count ? low : null, high: count ? high : null, count };
+  });
 }
 
 export function newScenario() {
@@ -342,8 +383,8 @@ export function strategySeries(strategy) {
     ? markets : [{ id: 'intermarket', name: 'Intermarket', color: '#1679b5' }];
 }
 
-const strategyLegArgs = (leg, market, start) =>
-  [leg.market === 'same' ? market : leg.market, leg.family, start + leg.offset * 3, leg.tenor];
+export const strategyLegArgs = (leg, market, start) =>
+  [leg.market === 'same' ? market : leg.market, leg.family, leg.delivery ?? start + leg.offset * 3, leg.tenor];
 const strategyLegWeight = leg => leg.weight * (leg.family === 'out' ? 100 : 1);
 
 export function readStrategy(strategy, market, start, read) {
@@ -357,7 +398,7 @@ export function readStrategy(strategy, market, start, read) {
   }
   const source = {
     'L1 VWAP': 'VWAP legs', 'Export last': 'Export legs', 'Export settle': 'Export legs',
-    Implied: 'Implied legs', Scenario: 'Scenario',
+    'Hourly close': 'Hourly closes', 'QuantHub close': 'QuantHub closes', Implied: 'Implied legs', Scenario: 'Scenario',
   };
   return Number.isFinite(value) ? {
     value, source: sources.size === 1 ? source[[...sources][0]] : 'Mixed inputs',
@@ -365,17 +406,19 @@ export function readStrategy(strategy, market, start, read) {
 }
 
 export function strategyStarts(book, strategy, filters) {
-  const first = strategy.legs[0];
+  const first = strategy.legs.find(leg => leg.delivery == null);
+  const available = (series, start) => strategy.legs.every(leg => {
+    const [id, family, delivery, tenor] = strategyLegArgs(leg, series.id, start);
+    return book.startsByType.get(keyOf(id, family, 0, tenor))?.has(delivery);
+  });
+  if (!first) {
+    const start = Math.min(...strategy.legs.map(leg => leg.delivery));
+    return strategySeries(strategy).some(series => available(series, start)) ? [start] : [];
+  }
   const scope = first.market === 'same' ? markets.map(market => market.id) : [first.market];
   const candidates = curveStarts(book, scope, first.family, first.tenor, { cadence: 'all', earlier: true });
   const datesFilter = { now: currentMonth(), ...filters };
   return candidates.map(start => start - first.offset * 3).filter(start =>
-    passDate(start, datesFilter) && strategySeries(strategy).some(series =>
-      strategy.legs.every(leg => {
-        const id = leg.market === 'same' ? series.id : leg.market;
-        const dates = book.startsByType.get(keyOf(id, leg.family, 0, leg.tenor));
-        return dates.has(start + leg.offset * 3);
-      }),
-    ),
+    passDate(start, datesFilter) && strategySeries(strategy).some(series => available(series, start)),
   );
 }

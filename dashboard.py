@@ -10,7 +10,12 @@ import time
 import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import urlsplit
+from urllib.parse import parse_qs, urlsplit
+
+from hourly_history import HourlyHistory, selection
+from live_session import LiveSession
+from structure_history import previous_closes, request_parameters, structure_bars
+from market_context import market_context
 
 ROOT = Path(__file__).resolve().parent
 CATALOG = json.loads((ROOT / "catalog.json").read_text(encoding="utf-8"))
@@ -19,6 +24,7 @@ SERVER = "https://ls.prod-live.hertshtengroup.com/"
 CLIENT_ID = "b6bd48fa-55db-41aa-9af8-e74283e478fb"
 AUTHORITY = "https://login.microsoftonline.com/0753c1a4-2be6-4a86-8763-32ae847e1186"
 SCOPES = ["api://28ab8830-42a2-4400-8ef0-07af1dfc1163/access_as_application"]
+WORK_EMAIL = re.compile(r"[A-Za-z0-9._+%-]+@hertshtengroup\.com", re.I)
 SHARED_CACHE = (
     Path.home() / "Downloads" / "LS_updated_auth" / "Lightstreamer - Shareable"
     / ".msal_token_cache.json"
@@ -42,7 +48,8 @@ def connection_problem(stage, error):
 
 
 class Feed:
-    def __init__(self):
+    def __init__(self, session=None):
+        self.session = session if session is not None else LiveSession()
         self.lock = threading.Lock()
         self.generation = 0
         self.connection = 0
@@ -58,6 +65,7 @@ class Feed:
         self.identified_items = set()
         self.remapped_items = set()
         self.unverified_updates = 0
+        self.resume_warning = ""
 
     def snapshot(self):
         with self.lock:
@@ -68,10 +76,13 @@ class Feed:
                 "identifiedItems": len(self.identified_items),
                 "remappedItems": len(self.remapped_items),
                 "unverifiedUpdates": self.unverified_updates,
+                "resumeWarning": self.resume_warning,
             }
 
-    def stop(self):
+    def stop(self, *, forget=False):
         with self.lock:
+            if forget:
+                self.session.clear()
             self.generation += 1
             self.cancel.set()
             if self.flow is not None:
@@ -84,10 +95,16 @@ class Feed:
             self.identified_items.clear()
             self.remapped_items.clear()
             self.unverified_updates = 0
+            self.resume_warning = ""
         if client is not None:
             client.disconnect()
 
-    def start(self, email):
+    def resume(self):
+        saved = self.session.load()
+        if saved and WORK_EMAIL.fullmatch(saved[0]):
+            self.start(saved[0], saved_cache=saved[1])
+
+    def start(self, email, *, saved_cache=None):
         with self.lock:
             if self.state not in {"offline", "error"}:
                 return False
@@ -99,10 +116,12 @@ class Feed:
             self.quotes.clear()
             self.received = None
             self.failed_batches = 0
-            self.state, self.message = "signing-in", "Checking Microsoft sign-in…"
+            self.resume_warning = ""
+            self.state = "signing-in"
+            self.message = "Restoring the live session…" if saved_cache is not None else "Checking Microsoft sign-in…"
         if old_client is not None:
             old_client.disconnect()
-        threading.Thread(target=self.authenticate, args=(generation, cancel, email), daemon=True).start()
+        threading.Thread(target=self.authenticate, args=(generation, cancel, email, saved_cache), daemon=True).start()
         return True
 
     def error(self, generation, message):
@@ -110,8 +129,22 @@ class Feed:
             if generation == self.generation and self.state != "error":
                 self.state, self.message, self.device = "error", message, None
 
-    def authenticate(self, generation, cancel, email):
+    def remember(self, generation, email, cache, remembered):
+        with self.lock:
+            if generation != self.generation:
+                return False
+            if not remembered or cache.has_state_changed:
+                try:
+                    self.session.save(email, cache.serialize())
+                except OSError:
+                    self.resume_warning = "Windows could not save this sign-in for automatic reconnect."
+                    return False
+            self.resume_warning = ""
+            return True
+
+    def authenticate(self, generation, cancel, email, saved_cache=None):
         stage = "Microsoft sign-in"
+        silent_only = saved_cache is not None
         try:
             import msal
             import lightstreamer.client  # Check availability before asking for sign-in.
@@ -121,15 +154,32 @@ class Feed:
 
         try:
             cache = msal.SerializableTokenCache()
+            remembered = saved_cache is not None
+            if not remembered:
+                saved = self.session.load()
+                if saved and saved[0].casefold() == email.casefold():
+                    saved_cache = saved[1]
+                    remembered = True
             try:
-                if SHARED_CACHE.is_file():
+                if remembered:
+                    cache.deserialize(saved_cache)
+                elif SHARED_CACHE.is_file():
                     cache.deserialize(SHARED_CACHE.read_text(encoding="utf-8"))
             except (OSError, ValueError):
                 cache = msal.SerializableTokenCache()
+                remembered = False
             app = msal.PublicClientApplication(CLIENT_ID, authority=AUTHORITY, token_cache=cache, timeout=12)
+            for account in app.get_accounts():
+                if (account.get("username") or "").casefold() != email.casefold():
+                    app.remove_account(account)
             accounts = app.get_accounts(username=email)
             result = app.acquire_token_silent(SCOPES, account=accounts[0]) if accounts else None
             if not result or "access_token" not in result:
+                if cancel.is_set():
+                    return
+                if silent_only:
+                    self.error(generation, "Microsoft requires sign-in again. Open Feed details to reconnect.")
+                    return
                 flow = app.initiate_device_flow(scopes=SCOPES)
                 if "user_code" not in flow:
                     self.error(generation, auth_problem("Microsoft could not start device sign-in.", flow))
@@ -155,6 +205,7 @@ class Feed:
                 return
 
             while not cancel.is_set():
+                remembered = self.remember(generation, email, cache, remembered)
                 stage = "Lightstreamer setup"
                 if not self.connect(generation, email, result["access_token"]):
                     return
@@ -270,12 +321,17 @@ class Feed:
 
 
 FEED = Feed()
+HOURLY = HourlyHistory()
 FILES = {
     "/": ("index.html", "text/html; charset=utf-8"),
     "/styles.css": ("styles.css", "text/css; charset=utf-8"),
     "/app.mjs": ("app.mjs", "text/javascript; charset=utf-8"),
     "/curve-engine.mjs": ("curve-engine.mjs", "text/javascript; charset=utf-8"),
     "/chart.mjs": ("chart.mjs", "text/javascript; charset=utf-8"),
+    "/hourly.mjs": ("hourly.mjs", "text/javascript; charset=utf-8"),
+    "/strategy-history.mjs": ("strategy-history.mjs", "text/javascript; charset=utf-8"),
+    "/structures.mjs": ("structures.mjs", "text/javascript; charset=utf-8"),
+    "/market-signals.mjs": ("market-signals.mjs", "text/javascript; charset=utf-8"),
     "/catalog.json": ("catalog.json", "application/json; charset=utf-8"),
 }
 
@@ -304,10 +360,53 @@ class Handler(BaseHTTPRequestHandler):
         if not self.valid_host():
             self.json_reply({"error": "Invalid host."}, 403)
             return
-        path = urlsplit(self.path).path
-        if path == "/api/feed":
+        url = urlsplit(self.path)
+        if url.path == "/api/feed":
             self.json_reply(FEED.snapshot())
-        elif file := FILES.get(path):
+        elif url.path == "/api/market-context":
+            try:
+                params = parse_qs(url.query, max_num_fields=1)
+                gold = params.get("gold", [])
+                if len(gold) != 1:
+                    raise ValueError("Choose a gold contract.")
+                result = market_context(HOURLY, gold[0])
+            except ValueError as error:
+                self.json_reply({"error": str(error)}, 400)
+                return
+            try:
+                self.json_reply(result)
+            except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+                pass
+        elif url.path == "/api/hourly":
+            try:
+                query = selection(parse_qs(url.query, keep_blank_values=True, max_num_fields=8), CATALOG)
+            except ValueError as error:
+                self.json_reply({"error": str(error)}, 400)
+                return
+            result = HOURLY.series(*query)
+            status = 502 if result["warnings"] and not result["candles"] else 200
+            try:
+                self.json_reply(result, status)
+            except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+                pass  # The browser changed its selection while the cache filled.
+        elif url.path in {"/api/structure-bars", "/api/structure-reference"}:
+            try:
+                params = parse_qs(url.query, keep_blank_values=True, max_num_fields=4)
+                if url.path == "/api/structure-reference":
+                    result = previous_closes(HOURLY, params)
+                    status = 502 if result["warning"] and not any(result["closes"]) else 200
+                else:
+                    query = request_parameters(params)
+                    result = structure_bars(HOURLY, *query)
+                    status = 502 if result["warnings"] and not any(result["series"]) else 200
+            except (ValueError, OverflowError) as error:
+                self.json_reply({"error": str(error)}, 400)
+                return
+            try:
+                self.json_reply(result, status)
+            except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+                pass
+        elif file := FILES.get(url.path):
             self.reply((ROOT / file[0]).read_bytes(), file[1])
         else:
             self.json_reply({"error": "Page unavailable."}, 404)
@@ -318,8 +417,12 @@ class Handler(BaseHTTPRequestHandler):
             self.json_reply({"error": "Open the dashboard locally."}, 403)
             return
         if self.path == "/api/disconnect":
-            FEED.stop()
-            self.json_reply({"ok": True})
+            try:
+                FEED.stop(forget=True)
+            except OSError:
+                self.json_reply({"error": "Windows could not clear the saved live session. Try Disconnect again."}, 500)
+            else:
+                self.json_reply({"ok": True})
             return
         if self.path != "/api/connect":
             self.json_reply({"error": "Page unavailable."}, 404)
@@ -330,7 +433,7 @@ class Handler(BaseHTTPRequestHandler):
                 raise ValueError
             payload = json.loads(self.rfile.read(size))
             email = payload["email"]
-            if not isinstance(email, str) or not re.fullmatch(r"[A-Za-z0-9._+%-]+@hertshtengroup\.com", email, re.I):
+            if not isinstance(email, str) or not WORK_EMAIL.fullmatch(email):
                 raise ValueError
         except (ValueError, TypeError, KeyError):
             self.json_reply({"error": "Enter your full Hertshten work email."}, 400)
@@ -366,6 +469,7 @@ if __name__ == "__main__":
     with server:
         url = f"http://127.0.0.1:{server.server_port}/"
         print(f"Intermarket dashboard: {url}", flush=True)
+        FEED.resume()
         if not args.no_browser:
             threading.Timer(0.35, webbrowser.open, args=(url,)).start()
         try:

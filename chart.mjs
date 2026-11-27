@@ -1,9 +1,9 @@
 import { monthLabel } from './curve-engine.mjs';
 
 const charts = new WeakMap();
-const clamp = (value, low, high) => Math.max(low, Math.min(high, value));
+export const clamp = (value, low, high) => Math.max(low, Math.min(high, value));
 
-function canvasContext(canvas) {
+export function canvasContext(canvas) {
   const { width, height } = canvas.getBoundingClientRect();
   const dpr = window.devicePixelRatio || 1;
   if (width < 1 || height < 1) return null;
@@ -31,7 +31,7 @@ function quantile(sorted, percentile) {
   return sorted[floor] + (sorted[Math.ceil(index)] - sorted[floor]) * (index - floor);
 }
 
-function tickStep(span) {
+export function tickStep(span) {
   const required = span / 6;
   const order = 10 ** Math.floor(Math.log10(required));
   return [1, 2, 2.5, 5, 10].find(mult => mult * order >= required) * order;
@@ -122,7 +122,7 @@ function draw(canvas) {
   const y = value => bottom - (value - low) / (high - low) * (bottom - top);
   ctx.fillStyle = axisColor;
   ctx.textAlign = 'left';
-  ctx.fillText(unit === 'bp' ? 'Basis points' : 'Price', 9, 15);
+  ctx.fillText(model.axisTitle ?? (unit === 'bp' ? 'Basis points' : 'Price'), 9, 15);
 
   const firstTick = Math.ceil(low / step - 1e-9);
   const lastTick = Math.floor(high / step + 1e-9);

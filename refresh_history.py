@@ -19,8 +19,11 @@ ROOT = Path(__file__).resolve().parent
 CATALOGUE = ROOT / "catalog.json"
 BASE_URL = "https://qh-api.corp.hertshtengroup.com/apis/"
 BATCH_SIZE = 50
+LOOKBACK_DAYS = 560
+CLOSE_CHUNK_DAYS = 242
 DAY_MS = 86_400_000
 QH_SETTINGS = {"QH_API_TOKEN", "QH_API_CA_BUNDLE"}
+DEFAULT_ENV_FILE = Path(os.environ.get("LOCALAPPDATA", "")) / "Hertshten" / "QH-MCP-Pilot" / ".env"
 LOG = logging.getLogger(__name__)
 
 
@@ -34,7 +37,7 @@ class NoRedirect(HTTPRedirectHandler):
 
 
 class QuantHub:
-    def __init__(self, env_file):
+    def __init__(self, env_file, *, ohlc_spacing=2.1):
         settings = {}
         if env_file and env_file.is_file():
             for line in env_file.read_text(encoding="utf-8-sig").splitlines():
@@ -54,6 +57,7 @@ class QuantHub:
             )),
         )
         self.next_ohlc = 0.0
+        self.ohlc_spacing = ohlc_spacing
 
     def get(self, endpoint, parameters, *, protected=False):
         headers = self.headers if protected else {"Accept": "application/json"}
@@ -61,7 +65,7 @@ class QuantHub:
         for attempt in range(2):
             if protected:
                 time.sleep(max(0, self.next_ohlc - time.monotonic()))
-                self.next_ohlc = time.monotonic() + 2.1
+                self.next_ohlc = time.monotonic() + self.ohlc_spacing
             try:
                 with self.opener.open(request, timeout=30) as response:
                     payload = json.load(response)
@@ -79,7 +83,7 @@ class QuantHub:
                     delay = 30
                 if not math.isfinite(delay) or delay > 60:
                     raise RuntimeError("QuantHub asked for a longer cooldown. Try again later.") from None
-                self.next_ohlc = time.monotonic() + max(2.1, delay)
+                self.next_ohlc = time.monotonic() + max(self.ohlc_spacing, delay)
             except (URLError, TimeoutError):
                 raise RuntimeError("QuantHub could not be reached. Check company network access.") from None
 
@@ -175,13 +179,18 @@ def refresh_closes(env_file):
     if len(set(ids)) != len(ids):
         raise RuntimeError("The catalogue contains duplicate instrument IDs.")
     end = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1)
-    start = end - timedelta(days=242)
-    client = QuantHub(env_file)
+    start = end - timedelta(days=LOOKBACK_DAYS + 2)
+    client = QuantHub(env_file, ohlc_spacing=3.5)
     results = {}
     LOG.info("Refreshing QuantHub daily closes for %d instrument IDs.", len(ids))
     for i in range(0, len(ids), BATCH_SIZE):
         batch = ids[i:i + BATCH_SIZE]
-        results.update(client.closes(batch, start, end))
+        through = end
+        while through > start:
+            first = max(start, through - timedelta(days=CLOSE_CHUNK_DAYS))
+            for instrument, closes in client.closes(batch, first, through).items():
+                results.setdefault(instrument, {}).update(closes)
+            through = first
         LOG.info("Checked %d of %d IDs. Traded closes for %d instruments.", i + len(batch), len(ids), len(results))
     if not results:
         raise RuntimeError("QuantHub returned no mapped traded closes for the catalogue.")
@@ -211,8 +220,7 @@ def refresh(env_file):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
-    default = Path(os.environ.get("LOCALAPPDATA", "")) / "Hertshten" / "QH-MCP-Pilot" / ".env"
-    parser.add_argument("--env-file", type=Path, default=default, help="Existing local QuantHub configuration")
+    parser.add_argument("--env-file", type=Path, default=DEFAULT_ENV_FILE, help="Existing local QuantHub configuration")
     parser.add_argument("--log-file", type=Path, help="Write refresh status to a rotating local log")
     options = parser.parse_args()
     handler = (RotatingFileHandler(options.log_file, maxBytes=100_000, backupCount=1, encoding="utf-8")

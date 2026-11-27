@@ -2,7 +2,7 @@
 
 Run `start-dashboard.cmd` to open the dashboard at [127.0.0.1:8765](http://127.0.0.1:8765/). Keep the launcher window running while you use it. The launcher uses this folder’s virtual environment if present, then checks the existing inter-market environment and installed Python.
 
-The dashboard starts in **Export snapshot** mode using the supplied last-trade and settlement prices. Click **Connect live**, enter your Hertshten work email, and complete Microsoft device sign-in if prompted. The board switches to **Live VWAP** when the first L1 VWAP arrives. Live access uses the same Microsoft app and L1 subscription settings as the supplied examples. The server runs on loopback and keeps the dashboard’s tokens in process memory.
+On first use, the dashboard starts in **Export snapshot** mode. Click **Connect live**, enter your Hertshten work email, and complete Microsoft device sign-in if prompted. The board switches to **Live VWAP** when the first L1 VWAP arrives. On Windows, the dashboard encrypts the successful sign-in cache under the current Windows profile and reconnects silently after a restart while Microsoft allows it. **Disconnect** clears the saved dashboard session. The server runs on loopback and uses the same Microsoft app and L1 subscription settings as the supplied examples.
 
 If live dependencies are missing, open PowerShell in this folder and run the following with a Python 3.10+ installation. Use `python` in place of `py -3` if needed.
 
@@ -17,9 +17,11 @@ py -3 -m venv .venv
 | Screen | What you can do |
 | --- | --- |
 | VWAP Board | View SR3, Euribor, and SONIA outrights and 3M, 6M, 12M, or 24M spreads and flies side by side. Select **All deliveries** for serial months or **Earlier contracts** for older starts. |
-| Live Prices | View the live price in basis points above the selected percentile for quarterly spreads, flies, and saved strategies. Choose a 30-, 60-, 90-, or 240-calendar-day lookback. **Level** and **Change** from the supplied settlement are also available. |
+| Live Prices | View the live price in basis points above the selected percentile for quarterly spreads, flies, and saved strategies. Choose a 30-, 60-, 90-, 240-, 365-, or 540-calendar-day lookback. **Level** and **Change** from the supplied settlement are also available. Select a price to open its QuantHub candlestick chart, which starts with daily candles from 1 January 2021 through today. |
+| Hourly History | View QuantHub one-hour candlesticks for listed 3M, 6M, and 12M spreads and flies in SR3, Euribor, or SONIA. Choose any listed quarterly spread position (S1 onward) or a fly position (G1–G3) to see available history from January 2021. Fixed packages are also available. |
 | Curves | Click a market in the legend to focus it and use **From** and **Through** to zoom by start delivery. **Focused range** uses edge markers for outlying points, with their exact values in the table or on hover. **Full range** fits all values. |
-| Strategies | Start with **6M fly − 2 × 3M fly** or another preset. Add weighted legs by market and product. **Same market (each)** values a strategy independently for SR3, Euribor, and SONIA. Offsets move a leg by whole calendar quarters from each row’s starting delivery. Save a strategy to reuse it in the simulator. |
+| Strategies | Add weighted legs by market and product. Set an exact **Delivery month** for a fixed leg or use a quarterly offset to compare dates along the curve. Choose a delivery month for every leg to open the hourly strategy chart. **Same market (each)** lets you choose SR3, Euribor, or SONIA for that chart. Save a strategy to reuse it in the simulator. |
+| Structures | Scan the live VWAP and historical percentile matrix by structure, market, and delivery. Choose a delivery cell to load that chart. **Compare with** adds a second market to the chart and lets you view either market or their difference. |
 | Simulator | Override quarterly 3M or 6M spreads independently by market in Scenario A or B. Select any supported curve or a saved strategy. Overlay the market baseline or the other scenario to see a value-by-value difference. |
 
 Saved strategies and scenario inputs persist in the browser profile used to open the dashboard, at the launch address above.
@@ -27,6 +29,10 @@ Saved strategies and scenario inputs persist in the browser profile used to open
 Use **Dark mode** in the dashboard header to switch themes. The dashboard saves the selection in the browser profile.
 
 On any chart, scroll over the plot to zoom around the pointer. Double-click to reset the zoom. With the chart focused, use **+**, **−**, or **0** for the same controls.
+
+Hourly History uses the existing local QuantHub configuration and company network. It caches requested candles under `.hourly-history/`. Run `python hourly_history.py` to prefetch S1–S3 and G1–G3. Higher spread ranks use the current catalogue of listed quarterly packages and fetch history when first selected. The generic number is the quarterly start position, with S1 and G1 using the first start after the roll date. Positions advance by one quarter at midnight UTC on March 1, June 1, September 1, and December 1. The tenor determines the distance between the legs. Charts display listed trade candles in basis points, with no price adjustment at the roll. Coverage depends on the trades available in QuantHub.
+
+Structures builds synthetic candles from the weighted sum of synchronized traded closes. Ten-minute and hourly candles use five-minute samples. Daily candles use hourly samples and UTC day boundaries. A sample is included when every leg in that series traded. Intermarket differences use samples common to both complete structures. The whole-strategy curve uses current dashboard prices by delivery month.
 
 ## Pricing conventions
 

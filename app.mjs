@@ -1,30 +1,71 @@
 import {
-  markets, tenors, buildBook, compareHistoricalClose, contractLabel, currentMonth, curveStarts, historicalPercentiles, liveBoardReader, londonDay,
+  markets, tenors, buildBook, closingRanges, compareHistoricalClose, contractLabel, currentMonth, curveStarts, historicalCloseReader, historicalPercentiles, keyOf, liveBoardReader, londonDay,
   marketReader, minimumPercentileDays, monthLabel, newScenario, outOfScaleOutright, percentileWindows, scenarioModel, scenarioMonths, strategySeries, strategyStarts,
-  readStrategy, typeLabel,
+  packageDeliveries, readStrategy, strategyLegArgs, strategyRangeWindows, strategyTenors, typeLabel,
 } from './curve-engine.mjs';
 import { formatValue, redrawCharts, showChart, sparkline } from './chart.mjs';
+import { mountHourly } from './hourly.mjs';
+import { createPriceOhlc, mountStrategyHistory } from './strategy-history.mjs';
+import { mountStructures } from './structures.mjs';
+import { mountMarketSignals } from './market-signals.mjs';
 
 const main = document.querySelector('#main');
-const titles = { vwap: 'VWAP Board', prices: 'Live Prices', curves: 'Curves', strategies: 'Strategies', simulator: 'Simulator' };
+const titles = { vwap: 'VWAP Board', prices: 'Live Prices', hourly: 'Hourly History', curves: 'Curves', strategies: 'Strategies', structures: 'Structures', simulator: 'Simulator', signals: 'Market Signals' };
 const descriptions = {
   vwap: 'Compare listed futures, calendar spreads, and butterflies across the three rates markets.',
   prices: 'Watch live spreads, flies, and saved strategies across quarterly deliveries.',
   curves: 'Plot the term structure by delivery across SR3, Euribor, and SONIA.',
-  strategies: 'Build a weighted package once and see its value across delivery dates.',
+  strategies: 'Build a weighted package with fixed delivery months or quarterly offsets.',
   simulator: 'Enter spread levels and compare the resulting market and strategy curves.',
 };
 const marketName = { SR3: 'SR3 · SOFR', I: 'Euribor', SO3: 'SONIA' };
-const allMarketOptions = [['all', 'All markets'], ...markets.map(m => [m.id, marketName[m.id]])];
-const typeOptions = [
-  ['out/0', 'Outright'],
-  ...['spread', 'fly'].flatMap(family => tenors.map(t => [`${family}/${t}`, typeLabel(family, t)])),
+const intermarketPairs = [
+  ['SR3', 'I', 'SOFR − Euribor'],
+  ['SR3', 'SO3', 'SOFR − SONIA'],
+  ['I', 'SO3', 'Euribor − SONIA'],
 ];
+const intermarketCurveSeries = intermarketPairs.map(([left, right, label], index) => ({
+  id: markets[index].id, left, right, label,
+}));
+const intermarketGroups = Object.fromEntries(['spread', 'fly'].map(family => [family, [3, 6, 12].map(tenor => ({
+  family, tenor, label: typeLabel(family, tenor),
+  rows: intermarketPairs.map(([left, right, label]) => ({
+    id: `${left}-${right}`, left, right, label,
+    strategy: { legs: [
+      { market: left, family, tenor, offset: 0, weight: 1 },
+      { market: right, family, tenor, offset: 0, weight: -1 },
+    ] },
+  })),
+}))]));
+const allMarketOptions = [['all', 'All markets'], ...markets.map(m => [m.id, marketName[m.id]])];
+const priceStructures = [
+  ['3MS vs 12MS (4:1) · Q−1', ['spread', 3, 4], ['spread', 12, -1, -1]],
+  ['3MS vs 6MS · Q+1', ['spread', 3, 1], ['spread', 6, -1, 1]],
+  ['3MS vs 12MS (3:1) · Q−1', ['spread', 3, 3], ['spread', 12, -1, -1]],
+  ['6MF vs 12MF (2:1) · Same Q', ['fly', 6, 2], ['fly', 12, -1, 0]],
+  ['3MS vs 6MF · Q+1', ['spread', 3, 1], ['fly', 6, -1, 1]],
+  ['6MS vs 12MS · Q+2', ['spread', 6, 1], ['spread', 12, -1, 2]],
+  ['6MS vs 12MF · Q+1', ['spread', 6, 1], ['fly', 12, -1, 1]],
+].map(([name, ...terms]) => ({
+  id: name, name,
+  legs: terms.map(([family, tenor, weight, offset = 0]) => ({ market: 'same', family, tenor, weight, offset })),
+}));
+const productOptions = periods => [
+  ['out/0', 'Outright'],
+  ...['spread', 'fly'].flatMap(family => periods.map(t => [`${family}/${t}`, typeLabel(family, t)])),
+];
+const typeOptions = productOptions(tenors);
+const strategyTypeOptions = productOptions(strategyTenors);
 const defaultFilter = () => ({ family: 'out', tenor: 3, market: 'all', cadence: 'quarterly', earlier: false, implied: true });
 const filters = { vwap: defaultFilter(), curves: { ...defaultFilter(), from: '', through: '', scale: 'focused' } };
-const priceFilters = { market: 'all', family: 'all', mode: 'percentile', horizon: '12', earlier: false, lookback: '30' };
-const lookbackOptions = percentileWindows.map(days => [days, `${days} days`]);
+const priceFilters = { market: 'all', family: 'all', mode: 'percentile', horizon: '12', earlier: false, lookback: '30', alertGap: 0.25 };
+const lookbackOptions = percentileWindows.map(days => [days, days === 365 ? '1 year (365 days)' : `${days} days`]);
 let priceHistory;
+let rangeHistory;
+const rangeEntries = [];
+const rangeFilters = { alerts: false, group: 'all', alertGap: 0.25 };
+const rangeGroups = [['all', 'All products and strategies'], ['package', 'Spreads & flies'],
+  ['spread', 'Intermarket spreads'], ['fly', 'Intermarket flies'], ['quarterly-structure', 'Quarterly structures'], ['saved', 'Saved strategies']];
 const historicalDateFormat = new Intl.DateTimeFormat('en-GB', {
   timeZone: 'UTC', day: 'numeric', month: 'short', year: 'numeric',
 });
@@ -64,26 +105,50 @@ const strategyKey = 'intermarket-strategies-v1';
 const scenarioKey = 'intermarket-scenarios-v1';
 const themeKey = 'intermarket-theme-v1';
 const priceLookbackKey = 'intermarket-price-lookback-v1';
+const priceAlertGapKey = 'intermarket-price-alert-gap-v1';
+const rangeAlertGapKey = 'intermarket-range-alert-gap-v1';
+const priceHighlightsKey = 'intermarket-price-highlights-v1';
+const savedHighlights = readStored(priceHighlightsKey, {});
+const priceHighlights = { price: savedHighlights.price !== false, range: savedHighlights.range !== false };
 const savedLookback = Number(readStored(priceLookbackKey, 30));
 if (percentileWindows.includes(savedLookback)) priceFilters.lookback = String(savedLookback);
+const savedAlertGap = readStored(priceAlertGapKey, priceFilters.alertGap);
+if (Number.isFinite(savedAlertGap) && savedAlertGap >= 0) priceFilters.alertGap = savedAlertGap;
+const savedRangeAlertGap = readStored(rangeAlertGapKey, rangeFilters.alertGap);
+if (Number.isFinite(savedRangeAlertGap) && savedRangeAlertGap >= 0) rangeFilters.alertGap = savedRangeAlertGap;
 const themeButton = document.querySelector('#theme-toggle');
 let saved = readStored(strategyKey, []);
 let draft = { ...structuredClone(presets.fly), preset: 'fly', id: null };
 const visiblePercentiles = new Map();
+const visibleOhlc = new Map();
+const visiblePriceCurves = new Map();
 let openPercentile;
+let openPriceCurve;
 const percentileDialog = document.querySelector('#percentile-dialog');
+const priceCurveDialog = document.querySelector('#price-curve-dialog');
+const priceCurveView = document.querySelector('#price-curve-view');
+const priceCurveCompare = document.querySelector('#price-curve-compare');
+const priceCurveDate = document.querySelector('#price-curve-date');
+const priceCurveCloseStatus = priceCurveDialog.querySelector('.price-curve-close-status');
+const priceCurveLegend = priceCurveDialog.querySelector('.price-curve-legend');
+const hiddenPriceCurveLines = { markets: new Set(), differences: new Set() };
 const popupLookback = document.querySelector('#percentile-lookback');
 const strategyDates = { cadence: 'quarterly', earlier: false, scale: 'focused' };
 let scenarios = readStored(scenarioKey, { A: newScenario(), B: newScenario() });
 const sim = { active: 'A', market: 'SR3', outputMarket: 'all', output: 'spread/3', compare: 'none', scale: 'focused' };
 let source = 'snapshot';
 let preferLive = true;
-let feed = { state: 'offline', quotes: {} };
+let feed = { state: 'checking', quotes: {} };
 let flaggedOutrights = 0;
 let screen;
 let book;
 let catalogueText;
 let historyCheckRunning = false;
+let hourlyScreen;
+let strategyHistory;
+let structuresScreen;
+let signalsScreen;
+let priceOhlc;
 
 function applyTheme(value) {
   const dark = value === 'dark';
@@ -91,10 +156,12 @@ function applyTheme(value) {
   themeButton.setAttribute('aria-pressed', String(dark));
   themeButton.title = dark ? 'Switch to light mode' : 'Switch to dark mode';
   redrawCharts();
+  hourlyScreen?.draw();
+  structuresScreen?.draw();
   if (book && screen === 'vwap') marketCards(marketReader(book, source, feed.quotes), filters.vwap);
 }
 
-applyTheme(readStored(themeKey, 'light'));
+applyTheme(readStored(themeKey, 'dark'));
 themeButton.addEventListener('click', () => {
   const value = document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark';
   applyTheme(value);
@@ -270,6 +337,8 @@ function paintScrollableTable(id, markup) {
   const { scrollTop, scrollLeft } = scroll;
   const active = document.activeElement;
   const focusedRank = scroll.contains(active) ? active.dataset.rankKey : null;
+  const focusedOhlc = scroll.contains(active) ? active.dataset.ohlcKey : null;
+  const focusedCurve = scroll.contains(active) ? active.dataset.priceCurveKey : null;
   scroll.className = next.className;
   scroll.replaceChildren(...next.childNodes);
   const footer = scroll.nextElementSibling;
@@ -281,22 +350,25 @@ function paintScrollableTable(id, markup) {
   scroll.scrollTop = scrollTop;
   scroll.scrollLeft = scrollLeft;
   if (focusedRank) scroll.querySelector(rankSelector(focusedRank))?.focus({ preventScroll: true });
+  if (focusedOhlc) scroll.querySelector(ohlcSelector(focusedOhlc))?.focus({ preventScroll: true });
+  if (focusedCurve) scroll.querySelector(priceCurveSelector(focusedCurve))?.focus({ preventScroll: true });
 }
 
-function paintChart(id, data) {
+function paintChart(id, data, legendMarkup) {
   const canvas = document.querySelector(`#${id}`);
   const scale = { 'market-chart': filters.curves.scale, 'strategy-chart': strategyDates.scale, 'sim-chart': sim.scale }[id];
   const clipped = showChart(canvas, {
-    ...data, empty: emptyPoints(data), focused: scale === 'focused',
+    ...data, empty: data.empty ?? emptyPoints(data), focused: scale === 'focused',
   });
   const legend = canvas.nextElementSibling;
-  const markup = data.series.map(line => {
+  const entries = legendMarkup ?? data.series.map(line => {
     const sample = `<i class="legend-line ${line.id} ${line.dashed ? 'dashed' : ''}"></i>${escape(line.label)}`;
     return id === 'market-chart'
       ? `<button type="button" data-isolate-market="${line.id}" aria-pressed="${data.series.length === 1}"
         title="${data.series.length === 1 ? 'Show all markets' : `Focus ${escape(line.label)}`}">${sample}</button>`
       : `<span>${sample}</span>`;
-  }).join('') + (clipped ? `<span class="clipped-note">${clipped} outside scale · see table or Full range</span>` : '')
+  }).join('');
+  const markup = entries + (clipped ? `<span class="clipped-note">${clipped} outside scale · see table or Full range</span>` : '')
     + '<span class="zoom-hint">Scroll to zoom · Double-click to reset</span>';
   if (legend.innerHTML !== markup) legend.innerHTML = markup;
 }
@@ -371,11 +443,13 @@ function updateMarket() {
 }
 
 function priceBoardShell() {
-  main.innerHTML = `${header()}
-    <section class="panel">
-      <div class="panel-head wrap">
-        <h2>Spreads &amp; flies</h2>
+  main.innerHTML = `
+    <div class="price-board-overview">
+    <div class="price-board-controls">
+      <div class="price-board-heading">
+        <h1>Live Prices</h1>
         <div class="price-timestamps">
+          <button class="button small" type="button" id="range-jump">Range monitor</button>
           <span id="history-refreshed" class="price-updated"></span>
           <span id="price-updated" class="price-updated"></span>
         </div>
@@ -396,46 +470,105 @@ function priceBoardShell() {
           <label id="price-history-filter" class="input-label" hidden>Lookback
             ${select('Percentile lookback', lookbackOptions,
               priceFilters.lookback, 'data-price-filter="lookback"')}</label>
+          <label class="input-label">Alert gap (bp)
+            <input id="price-alert-gap" type="number" min="0" step="0.01" value="${priceFilters.alertGap}" required>
+          </label>
         </div>
       </div>
       <p id="history-refresh-warning" class="notice warning" role="status" hidden></p>
       <p id="feed-notice" class="notice" hidden></p>
-      <div id="price-packages"></div>
+    </div>
+    <div class="price-board-grid">
+      <section class="panel price-board-panel price-board-wide">
+        <div class="panel-head"><h2>Spreads &amp; flies</h2></div>
+        <div class="price-panel-table" id="price-packages"></div>
+      </section>
+      <section class="panel price-board-panel price-board-wide">
+        <div class="panel-head"><h2>Quarterly structures</h2></div>
+        <div class="price-panel-table" id="price-structures"></div>
+      </section>
+      ${[['spread', 'Intermarket spread differences'], ['fly', 'Intermarket fly differences']].map(([family, title]) => `
+        <section class="panel price-board-panel">
+          <div class="panel-head"><h2>${title}</h2></div>
+          <div class="price-panel-table" id="price-intermarket-${family}"></div>
+        </section>`).join('')}
+      <section class="panel price-board-panel price-board-saved">
+        <div class="panel-head"><h2>Saved strategies</h2><a href="#strategies" class="button small">Manage strategies</a></div>
+        <div class="price-panel-table" id="price-strategies"></div>
+      </section>
+    </div>
+    <footer class="price-board-footer">
+      <div class="price-key price-actions-key"><span>Names open curves · Prices open OHLC</span>
+        <button type="button" class="highlight-toggle" data-alert-highlight="price" aria-label="Matching market prices">
+          <i class="price-match-key" aria-hidden="true"></i><span id="price-alert-key"></span><small aria-hidden="true"></small>
+        </button>
+        <button type="button" class="highlight-toggle" data-alert-highlight="range">
+          <i class="price-range-key" aria-hidden="true"></i>Range high / low alert<small aria-hidden="true"></small>
+        </button></div>
       <div id="settlement-key" class="price-key"><span><i class="heat-up heat-mid"></i>Above settlement</span>
         <span><i class="heat-down heat-mid"></i>Below settlement</span>
-        <span><i class="heat-flag-key"></i>Off-scale listed quote</span>
-        <span>Reference: supplied export settlement</span></div>
-      <div id="percentile-key" class="price-key" hidden><span>Price (bp) above percentile · Select a percentile for its daily closes</span>
-        <span><i class="heat-up heat-mid"></i>Higher rank</span>
+        <span><i class="heat-flag-key"></i>Off-scale listed quote</span></div>
+      <div id="percentile-key" class="price-key" hidden><span><i class="heat-up heat-mid"></i>Higher rank</span>
         <span><i class="heat-down heat-mid"></i>Lower rank</span>
         <span id="price-history-status"></span></div>
-    </section>
-    <section class="panel lower-section">
-      <div class="panel-head"><h2>Saved strategies</h2><div class="control-group">
-        <span id="strategy-price-basis" class="tag" hidden>Price (bp) + percentile</span>
-        <a href="#strategies" class="button small">Manage strategies</a></div></div>
-      <div id="price-strategies"></div>
+    </footer>
+    </div>
+    <section class="panel price-range-panel" id="range-monitor" aria-labelledby="range-heading">
+      <div class="panel-head wrap"><div><h2 id="range-heading" tabindex="-1">Range monitor</h2>
+        <p>QuantHub daily-close lows and highs in bp. The range alert covers prices near, at, or beyond a boundary.</p></div>
+        <div class="control-group">
+          ${select('Range monitor products', rangeGroups, rangeFilters.group, 'id="range-group"')}
+          <label class="input-label">Range alert gap (bp)
+            <input id="range-alert-gap" type="number" min="0" step="0.01" value="${rangeFilters.alertGap}" required>
+          </label>
+          <label class="check"><input id="range-alerts-only" type="checkbox"${checked(rangeFilters.alerts)}>Alerts only</label>
+        </div>
+      </div>
+      <div id="price-ranges"></div>
     </section>`;
+  for (const button of main.querySelectorAll('[data-alert-highlight]')) {
+    const kind = button.dataset.alertHighlight;
+    const setHighlight = () => {
+      const enabled = priceHighlights[kind];
+      main.toggleAttribute(`data-show-${kind}-highlights`, enabled);
+      button.setAttribute('aria-pressed', enabled);
+      button.querySelector('small').textContent = enabled ? 'On' : 'Off';
+    };
+    setHighlight();
+    button.addEventListener('click', () => {
+      priceHighlights[kind] = !priceHighlights[kind];
+      setHighlight();
+      try { localStorage.setItem(priceHighlightsKey, JSON.stringify(priceHighlights)); }
+      catch { /* The setting still applies to the open tab. */ }
+    });
+  }
+  main.querySelector('#range-jump').addEventListener('click', () => {
+    const heading = main.querySelector('#range-heading');
+    heading.focus({ preventScroll: true });
+    heading.closest('section').scrollIntoView({ block: 'start' });
+  });
+  main.scrollTop = 0;
   updatePriceBoard();
 }
 
 function heatCell(point, mode, inspection) {
   const title = inspection.label;
-  const flag = point?.note ? ' heat-flag' : '';
-  const tooltipTitle = point?.note ? `${title}\n${point.note}` : title;
+  const flag = `${point?.note ? ' heat-flag' : ''}${inspection.match ? ' heat-price-match' : ''}${inspection.exactMatch ? ' heat-price-exact' : ''}${inspection.rangeAlert ? ' heat-range-alert' : ''}`;
+  const tooltipTitle = [title, point?.note, inspection.match, inspection.rangeAlert].filter(Boolean).join('\n');
   if (!Number.isFinite(point?.value)) return `<td class="heat-value value-empty${flag}"
-    title="${escape(tooltipTitle)}" aria-label="${escape(`${tooltipTitle}. Live value unavailable.`)}">—</td>`;
+    title="${escape(tooltipTitle)}">${ohlcPrice('—', inspection)}</td>`;
+  const levelText = formatValue(point.value, 'bp');
   if (mode === 'percentile') {
     const rank = point.percentile;
     const deviation = rank.value === null ? 0 : rank.value - 50;
     const magnitude = Math.abs(deviation);
     const direction = magnitude < 5 ? '' : deviation > 0 ? 'heat-up' : 'heat-down';
     const strength = magnitude >= 30 ? 'heat-high' : magnitude >= 15 ? 'heat-mid' : 'heat-low';
-    const level = `${point.source} ${formatValue(point.value, 'bp')} bp`;
+    const level = `${point.source} ${levelText} bp`;
     const tooltip = `${tooltipTitle}\n${level}\n${rankDetails(rank)}`;
     return `<td class="heat-value heat-paired as-num ${direction} ${direction ? strength : ''}${flag}"
       title="${escape(tooltip)}" aria-label="${escape(tooltip)}">
-      <span class="heat-price">${formatValue(point.value, 'bp')}</span>
+      ${ohlcPrice(levelText, inspection, point.value)}
       ${percentileButton(point, inspection, `heat-rank${rank.value === null ? ' value-empty' : ''}`)}
     </td>`;
   }
@@ -443,17 +576,110 @@ function heatCell(point, mode, inspection) {
   const magnitude = Math.abs(change ?? 0);
   const direction = magnitude < .005 ? '' : change > 0 ? 'heat-up' : 'heat-down';
   const strength = magnitude >= 2 ? 'heat-high' : magnitude >= .5 ? 'heat-mid' : 'heat-low';
-  const text = mode === 'level' ? formatValue(point.value, 'bp') : formatValue(change, 'bp', true);
+  const text = mode === 'level' ? levelText : formatValue(change, 'bp', true);
   const details = Number.isFinite(change)
     ? `Export settlement ${formatValue(point.reference, 'bp')} bp · Change ${formatValue(change, 'bp', true)} bp`
     : 'Export settlement unavailable';
-  const tooltip = `${tooltipTitle}\n${point.source} ${formatValue(point.value, 'bp')} bp\n${details}`;
+  const tooltip = `${tooltipTitle}\n${point.source} ${levelText} bp\n${details}`;
   return `<td class="heat-value as-num ${direction ? `${direction} ${strength}` : ''} ${text === '—' ? 'value-empty' : ''}${flag}"
-    title="${escape(tooltip)}" aria-label="${escape(tooltip)}">${text}</td>`;
+    title="${escape(tooltip)}"${inspection.match || inspection.rangeAlert ? ` aria-label="${escape(tooltip)}"` : ''}>${ohlcPrice(text, inspection, point.value)}</td>`;
+}
+
+function ohlcSelector(key) {
+  return `[data-ohlc-key="${CSS.escape(key)}"]`;
+}
+
+function ohlcPrice(text, inspection, livePrice) {
+  if (!inspection.chart) return `<span class="heat-price">${text}</span>`;
+  const key = JSON.stringify(inspection.key);
+  visibleOhlc.set(key, { makeTarget: inspection.chart, livePrice, ranges: inspection.ranges });
+  return `<button class="heat-price price-ohlc-button" type="button" data-ohlc-key="${escape(key)}" aria-haspopup="dialog"
+    aria-label="${escape(`Open OHLC chart for ${inspection.label}${text === '—' ? '' : `, ${text} bp`}`)}">${text}</button>`;
+}
+
+function ohlcTarget(label, orders, reader, preferListed = false) {
+  const legs = orders.flatMap(order => {
+    const [market, family, delivery, tenor, weight] = order;
+    const listed = book.listed.has(keyOf(market, family, delivery, tenor));
+    if (family === 'out' || (listed && (preferListed || reader(market, family, delivery, tenor)?.source !== 'Implied'))) return [order];
+    const multipliers = family === 'spread' ? [1, -1] : [1, -2, 1];
+    return packageDeliveries(family, delivery, tenor).map((month, i) => [market, 'out', month, 0, weight * multipliers[i]]);
+  });
+  return { label, legs, native: legs.length === 1 ? legs[0] : null };
 }
 
 function rankedPoint(point, history, rankFor) {
   return { ...point, percentile: rankFor(history), rankFor };
+}
+
+function strategyBoardPoint(strategy, id, start, reader, history) {
+  const point = readStrategy(strategy, id, start, reader);
+  if (!point) return null;
+  if (history) return rankedPoint(point, history, sample => sample.strategyRank(strategy, id, start, point, reader, true));
+  const reference = readStrategy(strategy, id, start, (...args) => {
+    const value = reader(...args)?.reference;
+    return Number.isFinite(value) ? { value, source: 'Export settle' } : null;
+  });
+  return { ...point, reference: reference?.value };
+}
+
+function strategyPriceRow(strategy, id, reader, history, available) {
+  const hasChart = start => (!available || available.has(start)) && strategy.legs.every(leg => {
+    const [market, family, delivery, tenor] = strategyLegArgs(leg, id, start);
+    return book.startsByType.get(keyOf(market, family, 0, tenor))?.has(delivery);
+  });
+  return {
+    id, hasChart,
+    label: start => `${strategy.name} · ${marketName[id] ?? 'Intermarket'} · ${monthLabel(start)}`,
+    chart: (start, label) => ohlcTarget(label, strategy.legs.map(leg => [...strategyLegArgs(leg, id, start), Number(leg.weight)]), reader),
+    historyRows: (sample, start) => sample.strategyRows(strategy, id, start, reader),
+    read: start => !available || available.has(start) ? strategyBoardPoint(strategy, id, start, reader, history) : null,
+  };
+}
+
+function boardRanges(row, start, point) {
+  const rows = row.historyRows(rangeHistory.history, start, point);
+  if (!rangeHistory.ranges.has(rows)) rangeHistory.ranges.set(rows, closingRanges(rows, rangeHistory.today));
+  return rangeHistory.ranges.get(rows);
+}
+
+function rangeBoundary(price, range, gap) {
+  if (feed.state !== 'connected' || !Number.isFinite(price) || range.count < minimumPercentileDays) return '';
+  const atLow = compareHistoricalClose(price, range.low) <= 0;
+  const atHigh = compareHistoricalClose(price, range.high) >= 0;
+  if (atLow && atHigh) return 'At both';
+  if (atLow) return 'At low';
+  if (atHigh) return 'At high';
+  const nearLow = compareHistoricalClose(price - range.low, gap) <= 0;
+  const nearHigh = compareHistoricalClose(range.high - price, gap) <= 0;
+  return nearLow && nearHigh ? 'Near both' : nearLow ? 'Near low' : nearHigh ? 'Near high' : '';
+}
+
+function paintRangeMonitor() {
+  const alerts = rangeEntries.filter(entry => entry.extremes.some(Boolean)).length;
+  const jump = main.querySelector('#range-jump');
+  const jumpLabel = alerts ? `Range monitor · ${alerts} alerts` : 'Range monitor';
+  if (jump.textContent !== jumpLabel) jump.textContent = jumpLabel;
+  const rows = rangeEntries.filter(entry =>
+    (rangeFilters.group === 'all' || entry.group === rangeFilters.group) && (!rangeFilters.alerts || entry.extremes.some(Boolean)),
+  ).map(({ name, market, start, price, inspection, extremes }) => `<tr>
+    <th scope="row">${escape(name)}</th><td>${escape(market)}</td><td>${monthLabel(start)}</td>
+    <td class="number-cell as-num${inspection.rangeAlert ? ' heat-range-alert' : ''}"
+      title="${escape(inspection.rangeAlert)}">${ohlcPrice(formatValue(price, 'bp'), inspection, price)}</td>
+    ${inspection.ranges.map(({ low, high, count }, index) => {
+      const extreme = extremes[index];
+      return `<td class="number-cell as-num" title="${count} daily observations">
+        ${formatValue(low, 'bp')} / ${formatValue(high, 'bp')}
+        ${extreme ? `<span class="range-extreme ${extreme.endsWith('low') ? 'range-low' : extreme.endsWith('high') ? 'range-high' : ''}">${extreme}</span>` : ''}
+      </td>`;
+    }).join('')}</tr>`).join('');
+  paintScrollableTable('price-ranges', rows ? `<div class="table-scroll range-table-scroll" tabindex="0" role="region" aria-label="Scroll strategy ranges">
+    <table aria-label="Strategy high and low ranges"><thead><tr><th scope="col">Product / Strategy</th><th scope="col">Market</th>
+      <th scope="col">Delivery</th><th scope="col" class="number-cell">Live</th>
+      ${strategyRangeWindows.map(days => `<th scope="col" class="number-cell">${days}D low / high</th>`).join('')}
+    </tr></thead><tbody>${rows}</tbody></table></div>
+    <div class="table-foot"><span>Alerts require at least ${minimumPercentileDays} closes in the window</span><span>Low / high in bp</span></div>`
+    : `<p class="empty">${rangeFilters.alerts ? 'No range alerts for this selection.' : 'No products or strategies match these filters.'}</p>`);
 }
 
 function percentileButton(point, { key, label, context = label, kind }, className) {
@@ -484,27 +710,165 @@ function selectedHistory() {
   return priceHistory.series;
 }
 
-function priceMatrix(starts, groups, title, groupName, empty, mode) {
+const priceCurveSelector = key => `[data-price-curve-key="${CSS.escape(key)}"]`;
+
+function priceCurveButton(group, starts) {
+  const key = JSON.stringify(group.key);
+  visiblePriceCurves.set(key, { label: group.label, detail: group.detail, ...group.curve, starts });
+  return `<button class="heat-group-button" type="button" data-price-curve-key="${escape(key)}" aria-haspopup="dialog"
+    aria-label="${escape(`Show delivery curve for ${group.label}`)}">${escape(group.label)}</button>`;
+}
+
+function updateOpenPriceCurve() {
+  if (!priceCurveDialog.open) return;
+  const curve = visiblePriceCurves.get(openPriceCurve);
+  if (!curve) { priceCurveDialog.close(); return; }
+  const { describe = monthLabel, starts, label, detail, comparison, liveReader } = curve;
+  priceCurveView.closest('label').hidden = !comparison;
+  const differences = comparison && priceCurveView.value === 'differences';
+  const { series, read } = differences ? comparison : curve;
+  const title = differences ? `${label} intermarket difference curve` : `${label} delivery curve`;
+  const data = curveData(starts, series, read, 'bp', title, describe);
+  const today = londonDay();
+  const previous = book.closeDays.findLast(day => day < today);
+  const custom = priceCurveCompare.value === 'custom';
+  const compare = priceCurveCompare.value !== 'none';
+  const isoDate = day => new Date(day * 86_400_000).toISOString().slice(0, 10);
+  priceCurveDate.closest('label').hidden = !custom;
+  priceCurveDate.min = book.closeDays.length ? isoDate(book.closeDays[0]) : '';
+  priceCurveDate.max = isoDate(today - 1);
+  const day = custom ? priceCurveDate.valueAsNumber / 86_400_000 : previous;
+  const compareLabel = Number.isFinite(day) ? historicalDate(day) : '';
+  let historical = null;
+  let message = '';
+  if (compare && Number.isFinite(day) && day < today) {
+    const closeReader = historicalCloseReader(book, day, liveReader);
+    historical = curveData(starts, series, (id, start) => read(id, start, closeReader), 'bp', compareLabel, describe);
+    message = historical.series.some(line => line.points.some(Boolean))
+      ? `QuantHub close · ${compareLabel}`
+      : `No QuantHub closes for this selection on ${compareLabel}.`;
+  } else if (compare) {
+    message = custom ? 'Choose a past closing date.' : 'No previous QuantHub close is published.';
+  }
+  priceCurveDialog.querySelector('h2').textContent = label;
+  const description = differences ? 'First market minus second market, in basis points' : 'Live levels in basis points by delivery';
+  priceCurveDialog.querySelector('#price-curve-description').textContent = detail ? `${detail} · ${description}` : description;
+  if (priceCurveCloseStatus.textContent !== message) priceCurveCloseStatus.textContent = message;
+  const overlay = historical?.series.filter(line => line.points.some(Boolean)).map(line => ({
+    ...line, dashed: true, label: `${line.label} · Close`,
+  })) ?? [];
+  const hidden = hiddenPriceCurveLines[priceCurveView.value];
+  const chartLines = [...data.series.map(line => ({ ...line, label: `${line.label} · Live` })), ...overlay].map(line => ({
+    ...line, toggleKey: `${line.id}:${line.dashed ? 'close' : 'live'}`,
+  }));
+  const legend = chartLines.map(line => {
+    return `<button type="button" data-price-curve-line="${escape(line.toggleKey)}" aria-pressed="${!hidden.has(line.toggleKey)}">
+      <i class="legend-line ${escape(line.id)}${line.dashed ? ' dashed' : ''}" aria-hidden="true"></i>
+      ${escape(line.label)}</button>`;
+  }).join('');
+  const activeLine = document.activeElement?.dataset.priceCurveLine;
+  const visibleSeries = chartLines.filter(line => !hidden.has(line.toggleKey));
+  paintChart('price-delivery-chart', {
+    ...data, series: visibleSeries,
+    empty: visibleSeries.length ? undefined : 'Select a line in the legend to show it.',
+  }, legend);
+  if (activeLine) priceCurveLegend.querySelector(`[data-price-curve-line="${CSS.escape(activeLine)}"]`)?.focus({ preventScroll: true });
+  paintScrollableTable('price-delivery-values', historical
+    ? comparisonTable(data, historical, compareLabel, { baseLabel: 'Live', rowType: 'Delivery', tableLabel: 'Delivery curve comparison' })
+    : valueTable(data));
+}
+
+priceCurveLegend.addEventListener('click', event => {
+  const id = event.target.closest('[data-price-curve-line]')?.dataset.priceCurveLine;
+  if (!id) return;
+  const hidden = hiddenPriceCurveLines[priceCurveView.value];
+  if (hidden.has(id)) hidden.delete(id);
+  else hidden.add(id);
+  updateOpenPriceCurve();
+});
+
+priceCurveView.addEventListener('change', updateOpenPriceCurve);
+priceCurveCompare.addEventListener('change', () => {
+  if (priceCurveCompare.value === 'custom' && !priceCurveDate.value) {
+    const previous = book.closeDays.findLast(day => day < londonDay());
+    if (previous != null) priceCurveDate.valueAsNumber = previous * 86_400_000;
+  }
+  updateOpenPriceCurve();
+});
+priceCurveDate.addEventListener('input', updateOpenPriceCurve);
+priceCurveDate.addEventListener('change', updateOpenPriceCurve);
+priceCurveDialog.addEventListener('close', () => {
+  if (openPriceCurve) main.querySelector(priceCurveSelector(openPriceCurve))?.focus({ preventScroll: true });
+  openPriceCurve = undefined;
+});
+
+function matchingStrategyPrices({ series, read }, starts, maxGap) {
+  const limit = Math.round(maxGap * 100);
+  return new Map(starts.map(start => {
+    const quotes = series.flatMap(({ id }) => {
+      const value = read(id, start)?.value;
+      return Number.isFinite(value) ? [{ id, ticks: Math.round(Number(formatValue(value, 'bp')) * 100) }] : [];
+    });
+    const peers = new Map(quotes.map(({ id, ticks }) => [id, quotes.flatMap(other => {
+      const gap = Math.abs(ticks - other.ticks);
+      return id !== other.id && gap <= limit ? [{ market: marketName[other.id], gap }] : [];
+    })]));
+    return [start, peers];
+  }));
+}
+
+function priceMatrix(starts, groups, title, groupName, empty, mode, rowName = 'Market') {
   if (!starts.length || !groups.length) return `<p class="empty">${empty}</p>`;
   const headers = starts.map(start => `<th scope="col" class="heat-value">${monthLabel(start)}</th>`).join('');
-  const bodies = groups.map(group => `<tbody>${group.rows.map((row, index) => `<tr>
-    ${index === 0 ? `<th class="heat-group" scope="rowgroup" rowspan="${group.rows.length}" title="${escape(group.detail ?? group.label)}">${escape(group.label)}</th>` : ''}
-    <th class="heat-market" scope="row">${marketLabel(row.id)}</th>
+  const bodies = groups.map(group => {
+    const matches = feed.state === 'connected' && group.matchPrices && group.curve.series.length > 1
+      ? matchingStrategyPrices(group.curve, starts, priceFilters.alertGap) : null;
+    return `<tbody>${group.rows.map((row, index) => `<tr>
+    ${index === 0 ? `<th class="heat-group" scope="rowgroup" rowspan="${group.rows.length}" title="${escape(group.detail ?? group.label)}">${priceCurveButton(group, starts)}</th>` : ''}
+    <th class="heat-market" scope="row">${row.marketPair ? escape(row.marketPair) : marketLabel(row.id)}</th>
     ${starts.map(start => {
       const label = row.label(start);
-      return heatCell(row.read(start), mode, {
+      const point = row.read(start);
+      const peers = matches?.get(start).get(row.id);
+      const hasChart = row.hasChart(start);
+      const ranges = row.historyRows && (hasChart || Number.isFinite(point?.value)) ? boardRanges(row, start, point) : undefined;
+      const extremes = ranges?.map(range => rangeBoundary(point?.value, range, rangeFilters.alertGap));
+      const rangeAlert = ranges?.flatMap(({ days, low, high }, index) => {
+        const extreme = extremes[index];
+        return extreme ? [`${days}D ${extreme.toLowerCase()} (${formatValue(low, 'bp')} / ${formatValue(high, 'bp')} bp)`] : [];
+      }).join(' · ');
+      const inspection = {
         key: [...group.key, row.id, start], label, kind: group.kind,
+        match: peers?.length ? `Live price alert · ${peers.map(({ market, gap }) =>
+          `${market} (${formatValue(gap / 100, 'bp')} bp apart)`).join(', ')}` : '',
+        exactMatch: peers?.some(({ gap }) => gap === 0),
+        rangeAlert: rangeAlert ? `Range alert · ${rangeAlert}` : '',
+        chart: hasChart ? () => row.chart(start, label) : null, ranges,
         context: group.detail && group.detail !== group.label ? `${label} · ${group.detail}` : label,
+      };
+      if (ranges) rangeEntries.push({
+        group: group.key[0] === 'difference' ? group.key[1] : group.kind === 'strategy' ? group.key[0] : 'package',
+        name: group.curve.label ?? group.label, market: row.marketPair ?? marketName[row.id] ?? 'Intermarket',
+        start, price: point?.value, inspection, extremes,
       });
+      return heatCell(point, mode, inspection);
     }).join('')}
-  </tr>`).join('')}</tbody>`).join('');
-  return `<div class="table-scroll heat-scroll"><table class="heat-table" aria-label="${title}">
-    <thead><tr><th class="heat-group" scope="col">${groupName}</th><th class="heat-market" scope="col">Market</th>${headers}</tr></thead>
+  </tr>`).join('')}</tbody>`;
+  }).join('');
+  return `<div class="table-scroll heat-scroll" tabindex="0" role="region" aria-label="Scroll ${title.toLowerCase()}"><table class="heat-table" aria-label="${title}">
+    <thead><tr><th class="heat-group" scope="col">${groupName}</th><th class="heat-market" scope="col">${rowName}</th>${headers}</tr></thead>
     ${bodies}</table></div>`;
 }
 
 function updatePriceBoard() {
+  const today = londonDay();
+  if (rangeHistory?.today !== today) {
+    rangeHistory = { today, history: historicalPercentiles(book, today, strategyRangeWindows.at(-1)), ranges: new WeakMap() };
+  }
+  rangeEntries.length = 0;
   visiblePercentiles.clear();
+  visibleOhlc.clear();
+  visiblePriceCurves.clear();
   const selectedMarkets = activeMarkets(priceFilters.market);
   const marketIds = selectedMarkets.map(market => market.id);
   const dates = { ...filterDates(), earlier: priceFilters.earlier };
@@ -526,12 +890,22 @@ function updatePriceBoard() {
   document.querySelector('#price-history-filter').hidden = !percentileMode;
   document.querySelector('#settlement-key').hidden = percentileMode;
   document.querySelector('#percentile-key').hidden = !percentileMode;
-  document.querySelector('#strategy-price-basis').hidden = !percentileMode;
+  const alertText = priceFilters.alertGap === 0 ? 'Matching market prices blink'
+    : `Matching market prices blink · Within ${formatValue(priceFilters.alertGap, 'bp')} bp outlined`;
+  const alertKey = document.querySelector('#price-alert-key');
+  if (alertKey.textContent !== alertText) alertKey.textContent = alertText;
   const families = priceFilters.family === 'all' ? ['spread', 'fly'] : [priceFilters.family];
   const packages = families.flatMap(family => tenors.map(tenor => ({
     key: [family, tenor], kind: family, label: typeLabel(family, tenor),
+    curve: {
+      series: markets, liveReader: reader, read: (id, start, quotes = reader) => quotes(id, family, start, tenor),
+      describe: start => range(start, family, tenor),
+    },
     rows: selectedMarkets.map(({ id }) => ({
       id,
+      hasChart: start => book.startsByType.get(keyOf(id, family, 0, tenor))?.has(start),
+      chart: (start, label) => ohlcTarget(label, [[id, family, start, tenor, 1]], reader, true),
+      historyRows: (sample, start, point) => sample.packageRows(id, family, start, tenor, point),
       read(start) {
         const point = reader(id, family, start, tenor);
         return percentileMode && Number.isFinite(point?.value)
@@ -542,34 +916,71 @@ function updatePriceBoard() {
     })),
   })));
   const strategies = saved.flatMap(strategy => {
+    const available = new Set(strategyStarts(book, strategy, dates));
     const rows = strategySeries(strategy).filter(({ id }) =>
       marketIds.includes(id) || (id === 'intermarket' && strategy.legs.some(leg => marketIds.includes(leg.market))),
-    ).map(({ id }) => ({
-      id, label: start => `${strategy.name} · ${marketName[id] ?? 'Intermarket'} · ${monthLabel(start)}`,
-      read(start) {
-        const point = readStrategy(strategy, id, start, reader);
-        if (!point) return null;
-        if (percentileMode) {
-          return rankedPoint(point, history, sample => sample.strategyRank(strategy, id, start, point, reader, true));
-        }
-        const reference = readStrategy(strategy, id, start, (...args) => {
-          const value = reader(...args)?.reference;
-          return Number.isFinite(value) ? { value, source: 'Export settle' } : null;
-        });
-        return { ...point, reference: reference?.value };
-      },
-    }));
+    ).map(({ id }) => strategyPriceRow(strategy, id, reader, history, available));
     if (!rows.length) return [];
-    for (const start of strategyStarts(book, strategy, dates)) deliveries.add(start);
-    return [{ key: ['saved', strategy.id], kind: 'strategy', label: strategy.name, detail: formulaFor(strategy), rows }];
+    for (const start of available) deliveries.add(start);
+    return [{
+      key: ['saved', strategy.id], kind: 'strategy', label: strategy.name, detail: formulaFor(strategy), rows, matchPrices: true,
+      curve: {
+        series: strategySeries(strategy), liveReader: reader,
+        read: (id, start, quotes = reader) => available.has(start) ? readStrategy(strategy, id, start, quotes) : null,
+      },
+    }];
   });
   const starts = [...deliveries].sort((a, b) => a - b);
   if (priceFilters.horizon !== 'all') starts.length = Math.min(starts.length, Number(priceFilters.horizon));
   paintScrollableTable('price-packages', priceMatrix(starts, packages, 'Live spread and fly prices', 'Package',
     'No upcoming quarterly deliveries.', priceFilters.mode));
+  for (const [family, groups] of Object.entries(intermarketGroups)) {
+    const differences = groups.map(({ tenor, label, rows }) => ({
+      key: ['difference', family, tenor], kind: 'strategy', label,
+      curve: {
+        label: `${label} · Intermarket differences`,
+        series: intermarketCurveSeries,
+        liveReader: reader,
+        read: (id, start, quotes = reader) => readStrategy(rows[markets.findIndex(market => market.id === id)].strategy, 'intermarket', start, quotes),
+        describe: start => range(start, family, tenor),
+      },
+      rows: rows.filter(({ left, right }) => marketIds.includes(left) || marketIds.includes(right))
+        .map(({ id, left, right, label: marketPair, strategy }) => ({
+          id, marketPair,
+          label: start => `${label} · ${marketPair} · ${range(start, family, tenor)}`,
+          hasChart: start => [left, right].every(market => book.startsByType.get(keyOf(market, family, 0, tenor))?.has(start)),
+          chart: (start, title) => ohlcTarget(title, [[left, family, start, tenor, 1], [right, family, start, tenor, -1]], reader),
+          historyRows: (sample, start) => sample.strategyRows(strategy, 'intermarket', start, reader),
+          read: start => strategyBoardPoint(strategy, 'intermarket', start, reader, history),
+        })),
+    }));
+    paintScrollableTable(`price-intermarket-${family}`, priceMatrix(starts, differences, `Live intermarket ${family} differences`,
+      'Package', 'No upcoming quarterly deliveries.', priceFilters.mode, 'Market pair'));
+  }
+  const structures = priceStructures.map(strategy => {
+    const read = (id, start, quotes = reader) => readStrategy(strategy, id, start, quotes);
+    const comparison = {
+      series: intermarketCurveSeries,
+      read(id, start, quotes = reader) {
+        const { left, right } = intermarketCurveSeries.find(pair => pair.id === id);
+        const first = read(left, start, quotes), second = read(right, start, quotes);
+        if (!first || !second) return null;
+        return { value: first.value - second.value, source: first.source === second.source ? first.source : 'Mixed inputs' };
+      },
+    };
+    return {
+      key: ['quarterly-structure', strategy.id], kind: 'strategy', label: strategy.name, detail: formulaFor(strategy),
+      matchPrices: true,
+      curve: { series: markets, liveReader: reader, read, comparison },
+      rows: marketIds.map(id => strategyPriceRow(strategy, id, reader, history)),
+    };
+  });
+  paintScrollableTable('price-structures', priceMatrix(starts, structures, 'Live quarterly structures', 'Structure',
+    'No upcoming quarterly deliveries.', priceFilters.mode));
   paintScrollableTable('price-strategies', priceMatrix(starts, strategies, 'Live saved strategy prices', 'Strategy',
     saved.length ? 'No saved strategies match this market.' : 'Strategies appear here when you save them.',
     priceFilters.mode));
+  paintRangeMonitor();
   const updated = document.querySelector('#price-updated');
   updated.textContent = feed.received
     ? `Last VWAP update ${new Date(feed.received * 1000).toLocaleTimeString('en-GB', { timeZone: 'Europe/London' })} London`
@@ -593,6 +1004,8 @@ function updatePriceBoard() {
   warning.hidden = !latestFailed;
   updateFeedNotice();
   updateOpenPercentile();
+  updateOpenPriceCurve();
+  priceOhlc?.updateLivePrice();
 }
 
 function formulaFor(strategy) {
@@ -601,7 +1014,9 @@ function formulaFor(strategy) {
     const sign = weight < 0 ? '− ' : index ? '+ ' : '';
     const terms = [leg.market !== 'same' ? marketName[leg.market] : '', typeLabel(leg.family, leg.tenor)].filter(Boolean).join(' ');
     const shift = Number(leg.offset);
-    return `${sign}${Math.abs(weight) === 1 ? '' : `${Math.abs(weight)} × `}${terms}${shift ? ` [${shift > 0 ? '+' : ''}${shift}Q]` : ''}`;
+    const timing = leg.delivery != null ? ` [${contractLabel(leg.family, leg.delivery, leg.tenor)}]`
+      : shift ? ` [${shift > 0 ? '+' : ''}${shift}Q]` : '';
+    return `${sign}${Math.abs(weight) === 1 ? '' : `${Math.abs(weight)} × `}${terms}${timing}`;
   }).join(' ');
 }
 
@@ -615,7 +1030,16 @@ function savedList() {
     : '<p class="empty">No saved strategies yet.</p>';
 }
 
+function legDeliveryChoices(leg) {
+  const scope = leg.market === 'same' ? markets.map(market => market.id) : [leg.market];
+  const starts = curveStarts(book, scope, leg.family, leg.tenor, { cadence: 'all', earlier: true });
+  const choices = new Set(starts);
+  if (leg.delivery != null) choices.add(leg.delivery);
+  return [['', 'Use offset'], ...[...choices].sort((a, b) => a - b).map(start => [start, monthLabel(start)])];
+}
+
 function strategyShell() {
+  strategyHistory?.dispose();
   main.innerHTML = `${header()}<div class="strategy-layout">
     <section class="panel">
       <div class="panel-head"><h2>Strategy builder</h2>${button('New strategy', 'strategy-new', 'small')}</div>
@@ -626,9 +1050,10 @@ function strategyShell() {
         </div>
         ${draft.legs.map((leg, index) => `<div class="leg-fields" data-leg="${index}">
           <label>Market ${select(`Leg ${index + 1} market`, [['same', 'Same market (each)'], ...markets.map(m => [m.id, marketName[m.id]])], leg.market, 'data-leg-field="market"')}</label>
-          <label>Product ${select(`Leg ${index + 1} product`, typeOptions, `${leg.family}/${leg.tenor}`, 'data-leg-field="product"')}</label>
+          <label>Product ${select(`Leg ${index + 1} product`, strategyTypeOptions, `${leg.family}/${leg.tenor}`, 'data-leg-field="product"')}</label>
+          <label>Delivery month ${select(`Leg ${index + 1} delivery month`, legDeliveryChoices(leg), leg.delivery ?? '', 'data-leg-field="delivery"')}</label>
           <label>Weight <input type="number" step="any" value="${escape(leg.weight)}" required data-leg-field="weight"></label>
-          <label>Start offset (Q) <input type="number" step="1" min="-40" max="40" value="${escape(leg.offset)}" required data-leg-field="offset"></label>
+          <label>Start offset (Q) <input type="number" step="1" min="-40" max="40" value="${escape(leg.offset)}" required data-leg-field="offset"${disabled(leg.delivery != null)}></label>
           <button type="button" class="icon-button" data-remove-leg="${index}" aria-label="Remove leg ${index + 1}"${disabled(draft.legs.length === 1)}>×</button>
         </div>`).join('')}
         <div id="formula" class="formula"></div>
@@ -642,10 +1067,11 @@ function strategyShell() {
     </section>
     <section class="panel"><div class="panel-head"><h2>Saved strategies</h2></div><div class="saved-list">${savedList()}</div></section>
   </div>
+  <section class="panel lower-section" id="strategy-hourly" hidden></section>
   <section class="panel lower-section">
     <div class="panel-head"><div><h2>Strategy preview</h2><p>Values are in basis points. Outright price points are multiplied by 100.</p></div></div>
     <div class="toolbar">
-      ${dateControls(strategyDates)}
+      <div class="control-group" id="strategy-delivery-filters">${dateControls(strategyDates)}</div>
       <label class="input-label">Lookback ${select('Strategy percentile lookback',
         lookbackOptions, priceFilters.lookback, 'id="strategy-lookback"')}</label>
     </div>
@@ -653,24 +1079,30 @@ function strategyShell() {
     <div id="strategy-table"></div>
     <p class="scenario-help" id="strategy-history-note"></p>
   </section>
-  <section class="panel lower-section">
+  <section class="panel lower-section" id="strategy-curve-panel">
     <div class="panel-head"><h2>Strategy curve</h2>${badge('bp')}</div>
     <div class="toolbar">${scaleSelector(strategyDates.scale, 'data-filter="scale"')}</div>
     ${chartShell('strategy-chart')}
   </section>`;
+  strategyHistory = mountStrategyHistory(main.querySelector('#strategy-hourly'), marketName);
   updateStrategy();
 }
 
 const validLegs = strategy => strategy.legs.every(leg =>
   leg.weight !== '' && Number.isFinite(Number(leg.weight)) && Number(leg.weight) !== 0
-  && leg.offset !== '' && Number.isInteger(Number(leg.offset)) && Math.abs(leg.offset) <= 40,
+  && (leg.delivery != null ? Number.isInteger(leg.delivery)
+    : leg.offset !== '' && Number.isInteger(Number(leg.offset)) && Math.abs(leg.offset) <= 40),
 );
 
 function updateStrategy() {
   visiblePercentiles.clear();
   const valid = validLegs(draft);
-  const formula = valid ? formulaFor(draft) : 'Enter a nonzero weight and a whole-quarter offset for each leg.';
+  const formula = valid ? formulaFor(draft) : 'Enter nonzero weights and choose a delivery month or a whole-quarter offset for each leg.';
   document.querySelector('#formula').textContent = formula;
+  strategyHistory?.update(draft, valid);
+  const fixed = draft.legs.every(leg => leg.delivery != null);
+  document.querySelector('#strategy-delivery-filters').hidden = fixed;
+  document.querySelector('#strategy-curve-panel').hidden = fixed;
   const starts = valid ? strategyStarts(book, draft, strategyDates) : [];
   const history = source === 'live' ? selectedHistory() : null;
   const reader = source === 'live' ? liveBoardReader(book, feed.quotes) : marketReader(book, source, feed.quotes);
@@ -679,7 +1111,7 @@ function updateStrategy() {
     const point = readStrategy(strategy, id, start, reader);
     return history && point ? rankedPoint(point, history, sample => sample.strategyRank(strategy, id, start, point, reader, true)) : point;
   }, 'bp', 'Strategy value by start delivery', monthLabel);
-  paintChart('strategy-chart', data);
+  if (!fixed) paintChart('strategy-chart', data);
   paintScrollableTable('strategy-table', valueTable(data, { tall: true, rowType: 'Start delivery', strategyFormula: formula }));
   document.querySelector('#strategy-lookback').disabled = !history;
   document.querySelector('#strategy-history-note').textContent = history
@@ -807,7 +1239,7 @@ function saveStrategy(event) {
   const status = document.querySelector('#strategy-status');
   const name = draft.name.trim();
   if (!name || !validLegs(draft) || saved.some(item => item.id !== draft.id && item.name.toLowerCase() === name.toLowerCase())) {
-    status.textContent = 'Use a unique name, nonzero weights, and whole-quarter offsets.';
+    status.textContent = 'Use a unique name, nonzero weights, and delivery months or whole-quarter offsets.';
     status.hidden = false;
     return;
   }
@@ -895,10 +1327,12 @@ function simulatorInputs(model, reset) {
   }
 }
 
-function comparisonTable(data, comparison, compareLabel) {
-  if (!comparison || !data.starts.length) return valueTable(data, { tall: true, rowType: 'Contract legs / start' });
+function comparisonTable(data, comparison, compareLabel, {
+  baseLabel = `Scenario ${sim.active}`, rowType = 'Contract legs / start', tableLabel = 'Scenario comparison',
+} = {}) {
+  if (!comparison || !data.starts.length) return valueTable(data, { tall: true, rowType });
   const heads = data.series.map(line => `<th colspan="3" scope="colgroup" class="number-cell">${escape(line.label)}</th>`).join('');
-  const metrics = data.series.map(() => `<th scope="col" class="number-cell">Scenario ${sim.active}</th>
+  const metrics = data.series.map(() => `<th scope="col" class="number-cell">${escape(baseLabel)}</th>
     <th scope="col" class="number-cell">${escape(compareLabel)}</th><th scope="col" class="number-cell">Δ</th>`).join('');
   const rows = data.starts.map((month, index) => `<tr><th scope="row">${escape(data.describe(month))}</th>
     ${data.series.map((line, lineIndex) => {
@@ -907,9 +1341,9 @@ function comparisonTable(data, comparison, compareLabel) {
       const tone = diff > 0 ? 'delta-positive' : diff < 0 ? 'delta-negative' : 'value-empty';
       return `${pointCell(a, data.unit)}${pointCell(b, data.unit)}<td class="number-cell as-num ${tone}">${formatValue(diff, data.unit, true)}</td>`;
     }).join('')}</tr>`).join('');
-  return `<div class="table-scroll"><table aria-label="Scenario comparison">
-    <thead><tr><th rowspan="2" scope="col">Contract legs / start</th>${heads}</tr><tr>${metrics}</tr></thead><tbody>${rows}</tbody>
-    </table></div><div class="table-foot"><span>Δ = Scenario ${sim.active} minus ${escape(compareLabel)}</span><span>${data.unit === 'bp' ? 'Basis points' : 'Price points'}</span></div>`;
+  return `<div class="table-scroll"><table aria-label="${escape(tableLabel)}">
+    <thead><tr><th rowspan="2" scope="col">${escape(rowType)}</th>${heads}</tr><tr>${metrics}</tr></thead><tbody>${rows}</tbody>
+    </table></div><div class="table-foot"><span>Δ = ${escape(baseLabel)} minus ${escape(compareLabel)}</span><span>${data.unit === 'bp' ? 'Basis points' : 'Price points'}</span></div>`;
 }
 
 function updateSimulator(reset = false) {
@@ -948,8 +1382,20 @@ function updateSimulator(reset = false) {
 }
 
 function showScreen() {
+  priceOhlc?.close();
+  if (priceCurveDialog.open) priceCurveDialog.close();
+  hourlyScreen?.dispose();
+  hourlyScreen = undefined;
+  strategyHistory?.dispose();
+  strategyHistory = undefined;
+  structuresScreen?.dispose();
+  structuresScreen = undefined;
+  signalsScreen?.dispose();
+  signalsScreen = undefined;
   const route = location.hash.slice(1);
   screen = Object.hasOwn(titles, route) ? route : 'vwap';
+  document.body.classList.toggle('price-board-screen', screen === 'prices' || screen === 'signals');
+  document.body.classList.toggle('signals-screen', screen === 'signals');
   document.querySelector('#breadcrumb').textContent = titles[screen];
   document.querySelectorAll('nav a').forEach(link => {
     if (link.hash === `#${screen}`) link.setAttribute('aria-current', 'page');
@@ -957,15 +1403,19 @@ function showScreen() {
   });
   if (!book) return;
   if (screen === 'prices') priceBoardShell();
+  else if (screen === 'hourly') hourlyScreen = mountHourly(main, book, marketName, () => feed);
   else if (screen === 'strategies') strategyShell();
+  else if (screen === 'structures') structuresScreen = mountStructures(main, book, () => feed);
+  else if (screen === 'signals') signalsScreen = mountMarketSignals(main, () => book, () => feed, priceStructures, () => saved);
   else if (screen === 'simulator') simulatorShell();
   else marketShell();
   main.removeAttribute('aria-busy');
 }
 
 function updateScreen() {
-  if (!book) return;
+  if (!book || screen === 'hourly' || screen === 'structures') return;
   if (screen === 'prices') updatePriceBoard();
+  else if (screen === 'signals') signalsScreen?.update();
   else if (screen === 'strategies') updateStrategy();
   else if (screen === 'simulator') updateSimulator();
   else updateMarket();
@@ -974,8 +1424,30 @@ function updateScreen() {
 main.addEventListener('click', event => {
   const target = event.target.closest('button');
   if (!target) return;
+  if (target.dataset.priceCurveKey) {
+    openPriceCurve = target.dataset.priceCurveKey;
+    for (const hidden of Object.values(hiddenPriceCurveLines)) hidden.clear();
+    priceCurveView.value = 'markets';
+    priceCurveCompare.value = 'previous';
+    priceCurveDate.value = '';
+    priceCurveDialog.showModal();
+    updateOpenPriceCurve();
+    return;
+  }
   if (target.dataset.rankKey) {
     inspectPercentile(target.dataset.rankKey);
+    return;
+  }
+  if (target.dataset.ohlcKey) {
+    const key = target.dataset.ohlcKey;
+    const entry = visibleOhlc.get(key);
+    if (entry) {
+      priceOhlc ??= createPriceOhlc();
+      const priceHost = target.closest('.price-panel-table, #price-ranges');
+      priceOhlc.open(entry.makeTarget(), () => target.isConnected ? target.focus({ preventScroll: true })
+        : priceHost?.querySelector(ohlcSelector(key))?.focus({ preventScroll: true }), key,
+        () => feed.state === 'connected' ? visibleOhlc.get(key)?.livePrice : undefined, entry.ranges);
+    }
     return;
   }
   const { family, tenor, marketCard, isolateMarket, scenario, inputTenor, strategyId, removeLeg, action } = target.dataset;
@@ -1029,6 +1501,10 @@ main.addEventListener('click', event => {
 
 main.addEventListener('input', event => {
   const field = event.target;
+  if (field.id === 'price-alert-gap' || field.id === 'range-alert-gap') {
+    savePriceAlertGap(field);
+    return;
+  }
   const { legField, simField, simMonth } = field.dataset;
   if (field.id === 'strategy-name') draft.name = field.value;
   if (legField && field.tagName === 'INPUT') {
@@ -1066,8 +1542,30 @@ function savePriceLookback(value) {
   catch { /* The selected lookback still applies to the open tab. */ }
 }
 
+function savePriceAlertGap(field) {
+  const gap = field.valueAsNumber;
+  const isRange = field.id === 'range-alert-gap';
+  const filters = isRange ? rangeFilters : priceFilters;
+  if (!field.validity.valid || !Number.isFinite(gap) || gap === filters.alertGap) return;
+  filters.alertGap = gap;
+  try { localStorage.setItem(isRange ? rangeAlertGapKey : priceAlertGapKey, JSON.stringify(gap)); }
+  catch { /* The selected gap still applies to the open tab. */ }
+  updatePriceBoard();
+}
+
 main.addEventListener('change', event => {
   const field = event.target;
+  if (field.id === 'range-group' || field.id === 'range-alerts-only') {
+    if (field.id === 'range-group') rangeFilters.group = field.value;
+    else rangeFilters.alerts = field.checked;
+    paintRangeMonitor();
+    return;
+  }
+  if (field.id === 'price-alert-gap' || field.id === 'range-alert-gap') {
+    savePriceAlertGap(field);
+    field.value = (field.id === 'range-alert-gap' ? rangeFilters : priceFilters).alertGap;
+    return;
+  }
   if (field.id === 'strategy-lookback') {
     savePriceLookback(field.value);
     updateStrategy();
@@ -1108,11 +1606,19 @@ main.addEventListener('change', event => {
     return;
   }
   if (field.dataset.legField && field.tagName === 'SELECT') {
-    const leg = draft.legs[Number(field.closest('[data-leg]').dataset.leg)];
+    const row = field.closest('[data-leg]');
+    const leg = draft.legs[Number(row.dataset.leg)];
     if (field.dataset.legField === 'market') leg.market = field.value;
+    else if (field.dataset.legField === 'delivery') {
+      leg.delivery = field.value === '' ? null : Number(field.value);
+      row.querySelector('[data-leg-field="offset"]').disabled = leg.delivery != null;
+    }
     else {
       const [family, tenor] = field.value.split('/');
       Object.assign(leg, { family, tenor: Number(tenor) });
+    }
+    if (field.dataset.legField !== 'delivery') {
+      row.querySelector('[data-leg-field="delivery"]').innerHTML = optionList(legDeliveryChoices(leg), leg.delivery ?? '');
     }
     updateStrategy();
   }
@@ -1139,23 +1645,25 @@ let signInError = '';
 function paintConnection() {
   const state = feed.state;
   const connected = state === 'connected';
-  const active = !['offline', 'error', 'unreachable'].includes(state);
+  const active = ['signing-in', 'connecting', 'connected'].includes(state);
+  const checking = state === 'checking' || state === 'unreachable';
   const status = document.querySelector('#feed-status');
   const count = Object.keys(feed.quotes).length - flaggedOutrights;
   status.className = `feed-status ${connected && count ? 'is-live' : active ? 'is-pending' : state === 'error' ? 'is-error' : ''}`;
   const statusLabel = connected ? (count ? `Live · ${count} VWAPs` : 'Awaiting VWAP')
-    : { 'signing-in': 'Sign-in pending', connecting: 'Connecting', error: 'Feed error', unreachable: 'Server unavailable' }[state] ?? 'Snapshot mode';
+    : { checking: 'Checking connection', 'signing-in': feed.device ? 'Sign-in pending' : 'Connecting', connecting: 'Connecting', error: 'Feed error', unreachable: 'Server unavailable' }[state] ?? 'Snapshot mode';
   status.innerHTML = `<span></span>${escape(statusLabel)}`;
   status.title = feed.received ? `Last new VWAP ${new Date(feed.received * 1000).toLocaleTimeString('en-GB', { timeZone: 'Europe/London' })} London time` : snapshotMode();
-  document.querySelector('#feed-open').textContent = active || state === 'error' ? 'Feed details' : 'Connect live';
-  signIn.hidden = active;
-  const signature = [state, feed.message, feed.device?.code, signInError].join('|');
+  document.querySelector('#feed-open').textContent = active || checking || state === 'error' ? 'Feed details' : 'Connect live';
+  signIn.hidden = active || checking;
+  const signature = [state, feed.message, feed.device?.code, feed.resumeWarning, signInError].join('|');
   if (signature === detailState) return;
   detailState = signature;
   const detail = document.querySelector('#connection-detail');
   const device = feed.device;
   const message = signInError || (connected ? 'Connected to the Lightstreamer L1 adapter.' : feed.message);
   detail.innerHTML = `${message ? `<p>${escape(message)}</p>` : ''}
+    ${feed.resumeWarning ? `<p>${escape(feed.resumeWarning)}</p>` : ''}
     ${device ? `<div class="device-code">${escape(device.code)}</div><p>
       <a class="button primary small" href="https://microsoft.com/devicelogin" target="_blank" rel="noopener noreferrer">Open Microsoft sign-in</a></p>` : ''}
     ${active || state === 'error' ? button(connected ? 'Disconnect' : 'Clear connection', 'feed-disconnect', 'small') : ''}`;
@@ -1178,8 +1686,10 @@ async function refreshFeed() {
     const selectSource = document.querySelector('#data-source');
     if (selectSource) selectSource.value = 'live';
   }
-  if ((source === 'live' || screen === 'prices') && (switched || old.received !== feed.received || old.state !== feed.state ||
+  if ((source === 'live' || screen === 'prices' || screen === 'signals') && (switched || old.received !== feed.received || old.state !== feed.state ||
     old.failedBatches !== feed.failedBatches || Object.keys(old.quotes).length !== Object.keys(feed.quotes).length)) updateScreen();
+  hourlyScreen?.updateCurrent();
+  structuresScreen?.update();
   paintConnection();
 }
 
@@ -1237,11 +1747,12 @@ async function loadCatalogue() {
   book = buildBook(JSON.parse(text));
   catalogueText = text;
   priceHistory = undefined;
+  rangeHistory = undefined;
   return true;
 }
 
 async function checkPublishedHistory() {
-  const viewing = () => screen === 'prices' || (screen === 'strategies' && source === 'live');
+  const viewing = () => screen === 'prices' || screen === 'signals' || (screen === 'strategies' && source === 'live');
   if (!viewing() || document.hidden || historyCheckRunning) return;
   historyCheckRunning = true;
   try {
@@ -1264,13 +1775,14 @@ window.addEventListener('hashchange', () => {
 document.addEventListener('visibilitychange', checkPublishedHistory);
 window.addEventListener('storage', event => {
   if (event.key === themeKey) {
-    applyTheme(readStored(themeKey, 'light'));
+    applyTheme(readStored(themeKey, 'dark'));
     return;
   }
   if (event.key !== strategyKey) return;
   saved = readStored(strategyKey, []);
   if (!book) return;
   if (screen === 'prices') updatePriceBoard();
+  if (screen === 'signals') signalsScreen?.update();
   if (screen === 'strategies') main.querySelector('.saved-list').innerHTML = savedList();
   if (screen === 'simulator') {
     if (sim.output.startsWith('saved/') && !saved.some(item => `saved/${item.id}` === sim.output)) sim.output = 'spread/3';

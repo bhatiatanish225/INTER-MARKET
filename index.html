@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" data-theme="dark">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -16,8 +16,11 @@
     <nav aria-label="Dashboard screens">
       <a href="#vwap"><span class="nav-icon icon-grid" aria-hidden="true"></span>VWAP Board</a>
       <a href="#prices"><span class="nav-icon icon-prices" aria-hidden="true"></span>Live Prices</a>
+      <a href="#signals"><span class="nav-icon icon-sliders" aria-hidden="true"></span>Market Signals</a>
+      <a href="#hourly"><span class="nav-icon icon-candles" aria-hidden="true"></span>Hourly History</a>
       <a href="#curves"><span class="nav-icon icon-curve" aria-hidden="true"></span>Curves</a>
       <a href="#strategies"><span class="nav-icon icon-layers" aria-hidden="true"></span>Strategies</a>
+      <a href="#structures"><span class="nav-icon icon-curve" aria-hidden="true"></span>Structures</a>
       <a href="#simulator"><span class="nav-icon icon-sliders" aria-hidden="true"></span>Simulator</a>
     </nav>
     <div class="rail-footer"><span class="rail-lock" aria-hidden="true"></span>Local workspace</div>
@@ -26,8 +29,8 @@
     <header class="topbar">
       <div class="topbar-title">Rates futures <span>/</span> <strong id="breadcrumb">VWAP Board</strong></div>
       <div class="feed-controls">
-        <span id="feed-status" class="feed-status"><span></span>Snapshot mode</span>
-        <button class="button small" id="feed-open" type="button">Connect live</button>
+        <span id="feed-status" class="feed-status is-pending"><span></span>Checking connection</span>
+        <button class="button small" id="feed-open" type="button">Feed details</button>
         <button class="button small theme-toggle" id="theme-toggle" type="button" aria-label="Dark mode" aria-pressed="false" title="Switch to dark mode">
           <span class="theme-moon" aria-hidden="true"></span><span class="theme-label">Dark mode</span>
         </button>
@@ -66,6 +69,32 @@
     </figure>
     <div id="percentile-observations"></div>
     <p class="percentile-method" id="percentile-method"></p>
+  </dialog>
+  <dialog id="price-curve-dialog" aria-labelledby="price-curve-heading" aria-describedby="price-curve-description">
+    <div class="dialog-head">
+      <div><h2 id="price-curve-heading"></h2><p id="price-curve-description"></p></div>
+      <form method="dialog"><button class="icon-button" aria-label="Close delivery curve" autofocus>×</button></form>
+    </div>
+    <div class="price-curve-controls">
+      <label class="input-label" hidden>Curve view
+        <select id="price-curve-view">
+          <option value="markets">Market levels</option>
+          <option value="differences">Intermarket differences</option>
+        </select>
+      </label>
+      <label class="input-label">Compare with
+        <select id="price-curve-compare">
+          <option value="previous">Previous available close</option>
+          <option value="custom">Custom date</option>
+          <option value="none">Live only</option>
+        </select>
+      </label>
+      <label class="input-label" hidden>Closing date <input id="price-curve-date" type="date"></label>
+      <span class="price-curve-close-status" role="status"></span>
+    </div>
+    <div id="price-delivery-chart" class="chart-shell"></div>
+    <div class="chart-legend price-curve-legend" role="group" aria-label="Visible chart lines"></div>
+    <div id="price-delivery-values"></div>
   </dialog>
 </body>
 </html>

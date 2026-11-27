@@ -4,3 +4,4 @@ __pycache__/
 .msal_token_cache.json
 history-refresh.log
 history-refresh.log.1
+.hourly-history/
